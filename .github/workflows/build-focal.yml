@@ -1,0 +1,282 @@
+name: Build Mixxx on Ubuntu 20.04 (Focal)
+
+on:
+  push:
+  tags:
+    - '*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Ubuntu 20.04 hosted runners were retired; use a current runner with a Focal
+# container so the resulting binaries are actually linked against Focal's glibc.
+# Qt 6.10 is built from source for the same reason: the official Linux Qt
+# binaries target newer glibc versions.
+
+env:
+  QT_VERSION: 6.10.3
+  QT_PREFIX: /opt/qt/6.10.3
+
+jobs:
+  build-qt6:
+    name: Build Qt 6.10.3 on Focal
+    runs-on: ubuntu-24.04
+    container: ubuntu:20.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Prepare log directory
+        run: mkdir -p logs
+
+      - name: Install Qt build dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update 2>&1 | tee logs/qt-apt-update.log
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            gcc-10 \
+            g++-10 \
+            ca-certificates \
+            cmake \
+            curl \
+            file \
+            git \
+            libasound2-dev \
+            libdbus-1-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libglib2.0-dev \
+            libicu-dev \
+            libinput-dev \
+            libjpeg-dev \
+            libnss3-dev \
+            libpng-dev \
+            libpulse-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb-cursor-dev \
+            libxcb-glx0-dev \
+            libxcb-image0-dev \
+            libxcb-keysyms1-dev \
+            libxcb-randr0-dev \
+            libxcb-render-util0-dev \
+            libxcb-shape0-dev \
+            libxcb-shm0-dev \
+            libxcb-sync-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xinerama0-dev \
+            libxcb-xkb-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrender-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            ninja-build \
+            perl \
+            pkg-config \
+            python3 \
+            python3-distutils \
+            python3-pip \
+            tar \
+            xz-utils \
+            zstd 2>&1 | tee logs/qt-apt-install.log
+          python3 -m pip install --no-cache-dir 'cmake>=3.22,<4' 'ninja>=1.11' 2>&1 | tee logs/qt-pip-install.log
+
+      - name: Restore cached Qt installation
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/qt/6.10.3
+          key: focal-qt-${{ env.QT_VERSION }}
+
+      - name: Download Qt source
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          export CC=gcc-10 CXX=g++-10
+          mkdir -p /tmp/qt-src /tmp/qt-build
+          curl -fL --retry 5 \
+            "https://download.qt.io/official_releases/qt/${QT_VERSION%.*}/${QT_VERSION}/single/qt-everywhere-src-${QT_VERSION}.tar.xz" \
+            -o /tmp/qt.tar.xz 2>&1 | tee logs/qt-download.log
+          echo "cbc81e726b0ff3c0cdb0219bf74545e91cec013c4a8503c20f93f83d73dff5d2  /tmp/qt.tar.xz" \
+            | sha256sum -c - 2>&1 | tee logs/qt-sha256.log
+          tar -xJf /tmp/qt.tar.xz -C /tmp/qt-src 2>&1 | tee logs/qt-extract.log
+
+      - name: Configure Qt
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          export CC=gcc-10 CXX=g++-10
+          mkdir -p "${QT_PREFIX}"
+          cd /tmp/qt-build
+          /tmp/qt-src/qt-everywhere-src-${QT_VERSION}/configure \
+            -prefix "${QT_PREFIX}" \
+            -release \
+            -opensource \
+            -confirm-license \
+            -submodules qtbase,qtdeclarative,qtsvg,qtshadertools,qtmultimedia,qt5compat,qttools \
+            -nomake tests \
+            -nomake examples \
+            -skip qtwebengine \
+            -skip qt3d \
+            -skip qtquick3d \
+            -skip qtwayland \
+            -no-feature-cups \
+            2>&1 | tee "${GITHUB_WORKSPACE}/logs/qt-configure.log"
+
+      - name: Build and install Qt
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          export CC=gcc-10 CXX=g++-10
+          cd /tmp/qt-build
+          cmake --build . --parallel 2 2>&1 | tee "${GITHUB_WORKSPACE}/logs/qt-build.log"
+          cmake --install . 2>&1 | tee "${GITHUB_WORKSPACE}/logs/qt-install.log"
+
+      - name: Verify Qt installation
+        run: |
+          set -o pipefail
+          "${QT_PREFIX}/bin/qtpaths" --version 2>&1 | tee logs/qt-version.log
+          "${QT_PREFIX}/bin/cmake" --version 2>&1 | tee logs/qt-cmake.log || true
+          find "${QT_PREFIX}" -maxdepth 2 -type f \( -name 'Qt6Config.cmake' -o -name 'qmake6' \) \
+            2>&1 | tee logs/qt-files.log
+
+      - name: Package Qt installation
+        run: |
+          set -o pipefail
+          tar -C /opt/qt -czf "${GITHUB_WORKSPACE}/qt6-focal-${QT_VERSION}.tar.gz" 6.10.3 \
+            2>&1 | tee logs/qt-package.log
+
+      - name: Upload Qt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt6-focal-${{ env.QT_VERSION }}
+          path: qt6-focal-${{ env.QT_VERSION }}.tar.gz
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload Qt logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-qt-focal-${{ github.run_id }}
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  build-mixxx:
+    name: Build Mixxx on Focal
+    needs: build-qt6
+    runs-on: ubuntu-24.04
+    container: ubuntu:20.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Prepare log directory
+        run: mkdir -p logs
+
+      - name: Install Mixxx build dependencies (Focal-compatible)
+        shell: bash
+        run: |
+          set -o pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update 2>&1 | tee logs/apt-update.log
+          # The current Mixxx buildenv asks Focal for Qt6 and PipeWire packages
+          # which do not exist there. Qt is supplied by the preceding job.
+          cp tools/debian_buildenv.sh /tmp/debian_buildenv-focal.sh
+          apt-get install -y --no-install-recommends python3-pip gcc-10 g++-10 2>&1 | tee logs/focal-toolchain.log
+          sed -i \
+            -e '/libpipewire-0.3-dev/d' \
+            -e '/libspa-0.2-dev/d' \
+            -e '/libqt6/d' \
+            -e '/^ *qt6-/d' \
+            -e '/^ *qtkeychain-qt6-dev/d' \
+            -e '/^ *qml6-/d' \
+            -e '/qt6-shadertools-dev/d' \
+            -e '/qt6-5compat-dev/d' \
+            -e 's/sudo apt-get/apt-get/g' \
+            /tmp/debian_buildenv-focal.sh
+          chmod +x /tmp/debian_buildenv-focal.sh
+          /tmp/debian_buildenv-focal.sh setup 2>&1 | tee logs/buildenv.log
+          python3 -m pip install --no-cache-dir 'cmake>=3.22,<4' 2>&1 | tee logs/cmake-pip-install.log
+
+      - name: Download Qt artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: qt6-focal-${{ env.QT_VERSION }}
+          path: /tmp/qt-artifact
+
+      - name: Install Qt artifact
+        run: |
+          set -o pipefail
+          mkdir -p /opt/qt
+          tar -xzf "/tmp/qt-artifact/qt6-focal-${QT_VERSION}.tar.gz" -C /opt/qt \
+            2>&1 | tee logs/qt-extract.log
+          /opt/qt/${QT_VERSION}/bin/qtpaths --version 2>&1 | tee logs/qt-version.log
+
+      - name: Configure Mixxx
+        run: |
+          set -o pipefail
+          export PATH="/opt/qt/${QT_VERSION}/bin:${PATH}"
+          export CC=gcc-10 CXX=g++-10
+          export CMAKE_PREFIX_PATH="/opt/qt/${QT_VERSION}"
+          export LD_LIBRARY_PATH="/opt/qt/${QT_VERSION}/lib:${LD_LIBRARY_PATH:-}"
+          mkdir -p build
+          cmake \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_PREFIX_PATH="/opt/qt/${QT_VERSION}" \
+            -DQT6=ON \
+            -DQML=ON \
+            -DBULK=ON \
+            -DFFMPEG=ON \
+            -DLOCALECOMPARE=ON \
+            -DMAD=ON \
+            -DMODPLUG=ON \
+            -DWAVPACK=ON \
+            -DINSTALL_USER_UDEV_RULES=OFF \
+            .. 2>&1 | tee logs/mixxx-configure.log
+
+      - name: Build Mixxx
+        run: |
+          set -o pipefail
+          export PATH="/opt/qt/${QT_VERSION}/bin:${PATH}"
+          export CC=gcc-10 CXX=g++-10
+          export CMAKE_PREFIX_PATH="/opt/qt/${QT_VERSION}"
+          export LD_LIBRARY_PATH="/opt/qt/${QT_VERSION}/lib:${LD_LIBRARY_PATH:-}"
+          cmake --build build -j2 2>&1 | tee logs/mixxx-build.log
+
+      - name: Package Mixxx
+        if: success()
+        run: |
+          set -o pipefail
+          cd build
+          cpack -G DEB 2>&1 | tee "${GITHUB_WORKSPACE}/logs/cpack.log"
+
+      - name: Run tests
+        if: success()
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure --timeout 45 2>&1 | tee logs/ctest.log
+
+      - name: Upload build artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixxx-focal-build-${{ github.run_id }}
+          path: |
+            build/*.deb
+            build/mixxx
+            logs/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
