@@ -1,0 +1,173 @@
+# Build Qt 6.10.3 against Ubuntu 20.04 (Focal) and publish it as an artifact.
+# The artifact can subsequently be consumed by the Focal Mixxx build.
+
+name: Qt 6.10.3 - Ubuntu 20.04
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qt6-focal-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: 6.10.3
+  QT_PREFIX: /opt/qt/6.10.3
+  QT_SRC: ${{ github.workspace }}/qt-src
+  QT_BUILD: ${{ github.workspace }}/qt-build
+
+jobs:
+  build-qt6:
+    name: Qt 6.10.3 / Focal
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:20.04
+      options: --user root
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            build-essential \
+            cmake \
+            ninja-build \
+            perl \
+            python3 \
+            git \
+            wget \
+            xz-utils \
+            pkg-config \
+            libfontconfig1-dev \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libglib2.0-dev \
+            libicu-dev \
+            libinput-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-glx0-dev \
+            libxcb-keysyms1-dev \
+            libxcb-image0-dev \
+            libxcb-render-util0-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xinerama0-dev \
+            libxcb-xkb-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrender-dev \
+            libxrandr-dev \
+            libxcomposite-dev \
+            libxcursor-dev \
+            libxdamage-dev \
+            libx11-xcb-dev \
+            libwayland-dev \
+            libssl-dev
+
+      - name: Record toolchain versions
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p logs
+          {
+            echo '=== OS ==='
+            cat /etc/os-release
+            echo '=== GCC ==='
+            gcc --version
+            echo '=== CMake ==='
+            cmake --version
+            echo '=== Ninja ==='
+            ninja --version
+            echo '=== Python ==='
+            python3 --version
+          } 2>&1 | tee logs/toolchain.txt
+
+      - name: Download Qt source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$QT_SRC"
+          wget -q --show-progress \
+            "https://download.qt.io/official_releases/qt/6.10/${QT_VERSION}/submodules/qtbase-everywhere-src-${QT_VERSION}.tar.xz" \
+            -O qtbase.tar.xz
+          tar -xf qtbase.tar.xz -C "$QT_SRC" --strip-components=1
+          rm -f qtbase.tar.xz
+
+      - name: Configure Qt
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs "$QT_BUILD"
+          cd "$QT_BUILD"
+          "$QT_SRC/configure" \
+            -prefix "$QT_PREFIX" \
+            -release \
+            -opensource \
+            -confirm-license \
+            -nomake examples \
+            -nomake tests \
+            -qt-zlib \
+            -qt-pcre \
+            -qt-libpng \
+            -qt-libjpeg \
+            -qt-freetype \
+            -no-openssl 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-configure.log"
+
+      - name: Build Qt
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build "$QT_BUILD" --parallel "$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-build.log"
+
+      - name: Install Qt
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --install "$QT_BUILD" 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-install.log"
+
+      - name: Package Qt artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          tar -C /opt/qt -cJf "$GITHUB_WORKSPACE/artifacts/qt-${QT_VERSION}-ubuntu20.04.tar.xz" "${QT_VERSION}"
+          sha256sum "$GITHUB_WORKSPACE/artifacts/qt-${QT_VERSION}-ubuntu20.04.tar.xz" \
+            | tee "$GITHUB_WORKSPACE/artifacts/qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256"
+
+      - name: Upload Qt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt-${{ env.QT_VERSION }}-ubuntu20.04
+          path: artifacts/
+          retention-days: 14
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt-${{ env.QT_VERSION }}-ubuntu20.04-logs
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 14
