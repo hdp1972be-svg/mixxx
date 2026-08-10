@@ -1,35 +1,36 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow
 
-name: Ubuntu 20.04 build
+name: Ubuntu 20.04 Focal build
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - '**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  QT_VERSION: 6.10.3
+  QT_PREFIX: /opt/qt/6.10.3
+
 jobs:
   build:
-    name: Ubuntu 20.04 (focal)
+    name: Ubuntu 20.04 (Focal)
     runs-on: ubuntu-24.04
     container: ubuntu:20.04
 
     env:
       DEBIAN_FRONTEND: noninteractive
       TZ: Etc/UTC
+      CMAKE_VERSION: 3.31.8
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Prepare build container
+      - name: Prepare Focal build environment
         shell: bash
         run: |
           set -o pipefail
@@ -43,44 +44,51 @@ jobs:
             echo
             echo '=== CPU ==='
             nproc
-            echo
-            echo '=== Git ==='
-            git --version || true
           } | tee logs/00-environment.log
 
           apt-get update 2>&1 | tee logs/01-apt-update.log
           apt-get install -y --no-install-recommends \
-            bash \
-            ca-certificates \
-            git \
-            sudo \
-            wget \
-            curl \
-            xz-utils \
-            file \
-            pkg-config \
-            ninja-build \
-            build-essential \
-            python3 \
-            python3-pip \
+            bash ca-certificates git wget curl xz-utils file pkg-config \
+            ninja-build build-essential python3 python3-pip sudo \
             2>&1 | tee logs/02-base-packages.log
+
+      - name: Install CMake
+        shell: bash
+        run: |
+          set -o pipefail
+          wget -qO- "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+            | tar -xz -C /opt
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest" /usr/local/bin/ctest
+          cmake --version 2>&1 | tee logs/03-cmake-version.log
 
       - name: Install Mixxx build dependencies
         shell: bash
         run: |
           set -o pipefail
           chmod +x tools/debian_buildenv.sh
-          ./tools/debian_buildenv.sh setup 2>&1 | tee logs/03-mixxx-buildenv.log
+          ./tools/debian_buildenv.sh setup 2>&1 | tee logs/04-mixxx-buildenv.log
 
-      - name: Configure
+      - name: Verify Qt 6
         shell: bash
         run: |
           set -o pipefail
-          mkdir -p build
+          if [ ! -x "${QT_PREFIX}/bin/qmake" ]; then
+            echo "ERROR: Qt ${QT_VERSION} was not found at ${QT_PREFIX}" | tee logs/05-qt-check.log
+            exit 1
+          fi
+          "${QT_PREFIX}/bin/qmake" --version 2>&1 | tee logs/05-qt-check.log
+
+      - name: Configure
+        shell: bash
+        env:
+          PATH: /opt/qt/6.10.3/bin:${{ env.PATH }}
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3
+        run: |
+          set -o pipefail
           cmake \
-            -S . \
-            -B build \
-            -DCMAKE_BUILD_TYPE=Release \
+            -S . -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DQT6=ON \
             -DQML=ON \
             -DBULK=ON \
@@ -90,27 +98,23 @@ jobs:
             -DMODPLUG=ON \
             -DWAVPACK=ON \
             -DINSTALL_USER_UDEV_RULES=OFF \
-            2>&1 | tee logs/04-cmake-configure.log
+            2>&1 | tee logs/06-cmake-configure.log
 
       - name: Build
         shell: bash
+        env:
+          PATH: /opt/qt/6.10.3/bin:${{ env.PATH }}
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3
         run: |
           set -o pipefail
-          cmake --build build -j "$(nproc)" 2>&1 | tee logs/05-cmake-build.log
+          cmake --build build -j "$(nproc)" 2>&1 | tee logs/07-cmake-build.log
 
       - name: Run tests
         if: success()
         shell: bash
         run: |
           set -o pipefail
-          ctest --test-dir build --output-on-failure 2>&1 | tee logs/06-ctest.log
-
-      - name: Package
-        if: success()
-        shell: bash
-        run: |
-          set -o pipefail
-          cmake --build build --target package 2>&1 | tee logs/07-package.log
+          ctest --test-dir build --output-on-failure 2>&1 | tee logs/08-ctest.log
 
       - name: Collect diagnostics
         if: always()
@@ -121,19 +125,20 @@ jobs:
             git status --short
             echo
             echo '=== CMake cache ==='
-            if [ -f build/CMakeCache.txt ]; then
-              grep -E '^(CMAKE_(BUILD_TYPE|CXX_COMPILER|C_COMPILER):|QT6:|FFMPEG:)' build/CMakeCache.txt || true
-            fi
+            grep -E '^(CMAKE_(BUILD_TYPE|CXX_COMPILER|C_COMPILER):|QT6:|FFMPEG:)' build/CMakeCache.txt 2>/dev/null || true
+            echo
+            echo '=== Qt ==='
+            "${QT_PREFIX}/bin/qmake" --version 2>/dev/null || true
             echo
             echo '=== Built files ==='
-            find build -maxdepth 2 -type f \( -name '*.deb' -o -name 'mixxx' \) -print 2>/dev/null || true
+            find build -maxdepth 3 -type f \( -name '*.deb' -o -name 'mixxx' \) -print 2>/dev/null || true
           } | tee logs/99-diagnostics.log
 
       - name: Upload build logs and artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-20.04-build-${{ github.run_number }}
+          name: ubuntu-20.04-focal-${{ github.run_number }}
           path: |
             logs/
             build/*.deb
