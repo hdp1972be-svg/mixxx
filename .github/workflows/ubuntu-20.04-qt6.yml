@@ -158,13 +158,13 @@ jobs:
       - name: Configure
         shell: bash
         env:
-          PATH: /opt/qt/6.10.3/bin:${{ env.PATH }}
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
           CC: gcc-10
           CXX: g++-10
         run: |
           set -o pipefail
+          export PATH=/opt/qt/6.10.3/bin:$PATH
           # Debug build keeps full -g debug symbols for later gdb sessions.
           cmake \
             -S . -B build \
@@ -183,13 +183,13 @@ jobs:
       - name: Build
         shell: bash
         env:
-          PATH: /opt/qt/6.10.3/bin:${{ env.PATH }}
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
           CC: gcc-10
           CXX: g++-10
         run: |
           set -o pipefail
+          export PATH=/opt/qt/6.10.3/bin:$PATH
           cmake --build build -j "$(nproc)" 2>&1 | tee logs/07-cmake-build.log
 
       - name: Run tests
