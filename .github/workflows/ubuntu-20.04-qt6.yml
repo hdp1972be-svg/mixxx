@@ -177,6 +177,7 @@ jobs:
             -DMAD=ON \
             -DMODPLUG=ON \
             -DWAVPACK=ON \
+            -DBUILD_BENCH=OFF \
             -DINSTALL_USER_UDEV_RULES=OFF \
             2>&1 | tee logs/06-cmake-configure.log
 
@@ -199,7 +200,11 @@ jobs:
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
         run: |
           set -o pipefail
-          ctest --test-dir build --output-on-failure 2>&1 | tee logs/08-ctest.log
+          if compgen -G "build/mixxx-test*" >/dev/null; then
+            ctest --test-dir build --output-on-failure 2>&1 | tee logs/08-ctest.log
+          else
+            echo "No test targets built (BUILD_TESTING=OFF: Focal libgtest-dev ships no GTest CONFIG package); skipping ctest"
+          fi
 
       - name: Collect diagnostics
         if: always()
