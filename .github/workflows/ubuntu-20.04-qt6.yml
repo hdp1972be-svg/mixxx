@@ -169,10 +169,13 @@ jobs:
         run: |
           set -o pipefail
           export PATH=/opt/qt/6.10.3/bin:$PATH
-          # Debug build keeps full -g debug symbols for later gdb sessions.
+          # Debug build with -g3 (CMake's Debug default is -g): keeps macro
+          # definitions and full local/parameter info for gdb sessions.
           cmake \
             -S . -B build \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS_DEBUG=-g3 \
+            -DCMAKE_CXX_FLAGS_DEBUG=-g3 \
             -DQT6=ON \
             -DQML=ON \
             -DBULK=ON \
@@ -219,7 +222,7 @@ jobs:
             git status --short
             echo
             echo '=== CMake cache ==='
-            grep -E '^(CMAKE_(BUILD_TYPE|CXX_COMPILER|C_COMPILER):|QT6:|FFMPEG:)' build/CMakeCache.txt 2>/dev/null || true
+            grep -E '^(CMAKE_(BUILD_TYPE|C_FLAGS_DEBUG|CXX_FLAGS_DEBUG|CXX_COMPILER|C_COMPILER):|QT6:|FFMPEG:)' build/CMakeCache.txt 2>/dev/null || true
             echo
             echo '=== Qt ==='
             "${QT_PREFIX}/bin/qmake" --version 2>/dev/null || true
