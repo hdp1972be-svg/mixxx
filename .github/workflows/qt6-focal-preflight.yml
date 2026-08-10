@@ -1,0 +1,86 @@
+# Fast preflight for the Qt 6.10.x build on Ubuntu 20.04.
+# This deliberately checks the EGL/X11 -> Qt QShaderDescription::Bool conflict
+# before spending ~1 hour compiling Qt.
+
+name: Qt 6.10.3 - Focal preflight
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tests/qt/focal_egl_bool_probe.c'
+      - '.github/workflows/qt6-focal-preflight.yml'
+  pull_request:
+    paths:
+      - 'tests/qt/focal_egl_bool_probe.c'
+      - '.github/workflows/qt6-focal-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focal-header-probe:
+    name: EGL/X11 Bool collision / Ubuntu 20.04
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:20.04
+      options: --user root
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install probe dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            libegl1-mesa-dev
+
+      - name: Record environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p logs
+          {
+            echo '=== OS ==='
+            cat /etc/os-release
+            echo '=== GCC ==='
+            gcc --version
+            echo '=== EGL headers ==='
+            dpkg -l 'libegl*' 'libx11-dev' 2>/dev/null || true
+          } 2>&1 | tee logs/focal-probe-environment.log
+
+      - name: Compile EGL/Bool probe
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          gcc \
+            -std=c11 \
+            -Wall \
+            -Wextra \
+            -Werror \
+            tests/qt/focal_egl_bool_probe.c \
+            -o /tmp/focal_egl_bool_probe \
+            2>&1 | tee logs/focal-egl-bool-probe.log
+
+      - name: Run EGL/Bool probe
+        shell: bash
+        run: |
+          set -o pipefail
+          /tmp/focal_egl_bool_probe 2>&1 | tee -a logs/focal-egl-bool-probe.log
+
+      - name: Upload preflight logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt-6.10.3-focal-preflight-logs
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 14
