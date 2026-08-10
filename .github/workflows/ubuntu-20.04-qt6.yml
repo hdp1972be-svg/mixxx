@@ -95,11 +95,12 @@ jobs:
         run: |
           set -o pipefail
           # Mixxx needs hidapi >= 0.14.0 for controller bus-type info, but Focal
-          # only ships 0.9.0. Build the required release from source; its CMake
-          # install drops hidapiConfig.cmake into /usr/local/lib/cmake/hidapi.
-          wget -q "https://github.com/libusb/hidapi/releases/download/hidapi-0.14.0/hidapi-0.14.0.tar.gz" -O /tmp/hidapi.tar.gz
+          # only ships 0.9.0. The 0.14.0 GitHub release ships no source tarball,
+          # so pull the tag archive from codeload; its CMake install drops
+          # hidapiConfig.cmake into /usr/local/lib/cmake/hidapi.
+          wget -q "https://github.com/libusb/hidapi/archive/refs/tags/hidapi-0.14.0.tar.gz" -O /tmp/hidapi.tar.gz
           tar -xzf /tmp/hidapi.tar.gz -C /tmp
-          cmake -S /tmp/hidapi-0.14.0 -B /tmp/hidapi-build \
+          cmake -S /tmp/hidapi-hidapi-0.14.0 -B /tmp/hidapi-build \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DHIDAPI_BUILD_HIDTEST=OFF
           cmake --build /tmp/hidapi-build -j"$(nproc)" 2>&1 | tee logs/05-hidapi-build.log
           cmake --install /tmp/hidapi-build 2>&1 | tee logs/05-hidapi-install.log
