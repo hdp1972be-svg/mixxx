@@ -71,7 +71,14 @@ jobs:
           # The current Mixxx buildenv asks Focal for Qt6 and PipeWire packages
           # which do not exist there. Qt is supplied by the qt6-focal artifact.
           cp tools/debian_buildenv.sh /tmp/debian_buildenv-focal.sh
-          apt-get install -y --no-install-recommends gcc-10 g++-10 2>&1 | tee logs/04-focal-toolchain.log
+          # GCC 10's C++20 concepts support is incomplete: constraint
+          # satisfaction on class-template member templates fails with
+          # "is_enum_v used in its own initializer". Focal has no gcc-11+,
+          # so pull gcc-12 from the ubuntu-toolchain-r/test PPA.
+          apt-get install -y --no-install-recommends software-properties-common 2>&1 | tee logs/04-ppatools.log
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test 2>&1 | tee logs/04-ppa.log
+          apt-get update 2>&1 | tee logs/04-ppa-update.log
+          apt-get install -y --no-install-recommends gcc-12 g++-12 2>&1 | tee logs/04-focal-toolchain.log
           # The custom-built Qt 6.10 enables xkbcommon, so Qt6GuiPrivate
           # needs libxkbcommon-dev present at Mixxx build time. Focal ships
           # xkbcommon 0.9.1 (>= the required 0.9.0).
@@ -182,8 +189,8 @@ jobs:
         env:
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
-          CC: gcc-10
-          CXX: g++-10
+          CC: gcc-12
+          CXX: g++-12
         run: |
           set -o pipefail
           export PATH=/opt/qt/6.10.3/bin:$PATH
@@ -212,8 +219,8 @@ jobs:
         env:
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
-          CC: gcc-10
-          CXX: g++-10
+          CC: gcc-12
+          CXX: g++-12
         run: |
           set -o pipefail
           export PATH=/opt/qt/6.10.3/bin:$PATH
