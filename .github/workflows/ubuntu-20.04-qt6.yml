@@ -76,6 +76,9 @@ jobs:
           # needs libxkbcommon-dev present at Mixxx build time. Focal ships
           # xkbcommon 0.9.1 (>= the required 0.9.0).
           apt-get install -y --no-install-recommends libxkbcommon-dev libxkbcommon-x11-dev 2>&1 | tee logs/04-xkbcommon.log
+          # Qt's qsb shader baker is invoked during the build and needs the
+          # dbus runtime library, which our Qt6 deb filtering removes.
+          apt-get install -y --no-install-recommends libdbus-1-3 2>&1 | tee logs/04-dbus.log
           sed -i \
             -e '/libpipewire-0.3-dev/d' \
             -e '/libspa-0.2-dev/d' \
