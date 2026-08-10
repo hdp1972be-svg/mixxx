@@ -1,0 +1,195 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+
+name: Ubuntu 20.04 Focal build (Qt 6 from artifact)
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  QT_VERSION: 6.10.3
+  QT_PREFIX: /opt/qt/6.10.3
+
+jobs:
+  build:
+    name: Ubuntu 20.04 (Focal)
+    runs-on: ubuntu-24.04
+    container: ubuntu:20.04
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+      CMAKE_VERSION: 3.31.8
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Prepare Focal build environment
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs build
+          {
+            echo '=== OS ==='
+            cat /etc/os-release
+            echo
+            echo '=== Kernel ==='
+            uname -a
+            echo
+            echo '=== CPU ==='
+            nproc
+          } | tee logs/00-environment.log
+
+          apt-get update 2>&1 | tee logs/01-apt-update.log
+          apt-get install -y --no-install-recommends \
+            bash ca-certificates git wget curl xz-utils file pkg-config \
+            ninja-build build-essential python3 python3-pip sudo gdb \
+            2>&1 | tee logs/02-base-packages.log
+
+      - name: Install CMake
+        shell: bash
+        run: |
+          set -o pipefail
+          wget -qO- "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+            | tar -xz -C /opt
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest" /usr/local/bin/ctest
+          cmake --version 2>&1 | tee logs/03-cmake-version.log
+
+      - name: Install Mixxx build dependencies (Focal-compatible, no Qt)
+        shell: bash
+        run: |
+          set -o pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          # The current Mixxx buildenv asks Focal for Qt6 and PipeWire packages
+          # which do not exist there. Qt is supplied by the qt6-focal artifact.
+          cp tools/debian_buildenv.sh /tmp/debian_buildenv-focal.sh
+          apt-get install -y --no-install-recommends gcc-10 g++-10 2>&1 | tee logs/04-focal-toolchain.log
+          sed -i \
+            -e '/libpipewire-0.3-dev/d' \
+            -e '/libspa-0.2-dev/d' \
+            -e '/libqt6/d' \
+            -e '/^ *qt6-/d' \
+            -e '/^ *qtkeychain-qt6-dev/d' \
+            -e '/^ *qml6-/d' \
+            -e '/qt6-shadertools-dev/d' \
+            -e '/qt6-5compat-dev/d' \
+            -e 's/sudo apt-get/apt-get/g' \
+            /tmp/debian_buildenv-focal.sh
+          chmod +x /tmp/debian_buildenv-focal.sh
+          /tmp/debian_buildenv-focal.sh setup 2>&1 | tee logs/04-mixxx-buildenv.log
+
+      - name: Find Qt artifact build
+        id: find-qt
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'qt6-focal.yml',
+              status: 'success',
+              per_page: 1,
+            });
+            if (data.total_count === 0) {
+              core.setFailed('No successful qt6-focal.yml run found; run that workflow first.');
+            }
+            const run = data.workflow_runs[0];
+            core.setOutput('run_id', String(run.id));
+            console.log(`Using Qt build run ${run.id}`);
+
+      - name: Download Qt artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: qt-${{ env.QT_VERSION }}-ubuntu20.04
+          run-id: ${{ steps.find-qt.outputs.run_id }}
+          path: /tmp/qt-artifact
+
+      - name: Install Qt artifact
+        shell: bash
+        run: |
+          set -o pipefail
+          cd /tmp/qt-artifact
+          sha256sum -c "qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256" 2>&1 | tee "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+          mkdir -p /opt/qt
+          tar -C /opt/qt -xJf "qt-${QT_VERSION}-ubuntu20.04.tar.xz" 2>&1 | tee -a "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+          "${QT_PREFIX}/bin/qmake" --version 2>&1 | tee -a "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+
+      - name: Configure
+        shell: bash
+        env:
+          PATH: /opt/qt/6.10.3/bin:${{ env.PATH }}
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3
+          CC: gcc-10
+          CXX: g++-10
+        run: |
+          set -o pipefail
+          # Debug build keeps full -g debug symbols for later gdb sessions.
+          cmake \
+            -S . -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DQT6=ON \
+            -DQML=ON \
+            -DBULK=ON \
+            -DFFMPEG=ON \
+            -DLOCALECOMPARE=ON \
+            -DMAD=ON \
+            -DMODPLUG=ON \
+            -DWAVPACK=ON \
+            -DINSTALL_USER_UDEV_RULES=OFF \
+            2>&1 | tee logs/06-cmake-configure.log
+
+      - name: Build
+        shell: bash
+        env:
+          PATH: /opt/qt/6.10.3/bin:${{ env.PATH }}
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3
+          CC: gcc-10
+          CXX: g++-10
+        run: |
+          set -o pipefail
+          cmake --build build -j "$(nproc)" 2>&1 | tee logs/07-cmake-build.log
+
+      - name: Run tests
+        if: success()
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure 2>&1 | tee logs/08-ctest.log
+
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '=== Git status ==='
+            git status --short
+            echo
+            echo '=== CMake cache ==='
+            grep -E '^(CMAKE_(BUILD_TYPE|CXX_COMPILER|C_COMPILER):|QT6:|FFMPEG:)' build/CMakeCache.txt 2>/dev/null || true
+            echo
+            echo '=== Qt ==='
+            "${QT_PREFIX}/bin/qmake" --version 2>/dev/null || true
+            echo
+            echo '=== Built files ==='
+            find build -maxdepth 3 -type f \( -name '*.deb' -o -name 'mixxx' \) -print 2>/dev/null || true
+          } | tee logs/99-diagnostics.log
+
+      - name: Upload build logs and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-20.04-qt6-${{ github.run_number }}
+          path: |
+            logs/
+            build/*.deb
+            build/mixxx
+          if-no-files-found: warn
+          retention-days: 14
