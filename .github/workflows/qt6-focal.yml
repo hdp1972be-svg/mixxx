@@ -23,6 +23,7 @@ env:
   QT_PREFIX: /opt/qt/6.10.3
   QT_SRC: ${{ github.workspace }}/qt-src
   QT_BUILD: ${{ github.workspace }}/qt-build
+  CMAKE_VERSION: 3.31.9
 
 jobs:
   build-qt6:
@@ -35,7 +36,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install Focal build dependencies
         shell: bash
         run: |
           set -euxo pipefail
@@ -44,7 +45,6 @@ jobs:
           apt-get install -y --no-install-recommends \
             ca-certificates \
             build-essential \
-            cmake \
             ninja-build \
             perl \
             python3 \
@@ -82,9 +82,21 @@ jobs:
             libxcomposite-dev \
             libxcursor-dev \
             libxdamage-dev \
-            libx11-xcb-dev \
             libwayland-dev \
             libssl-dev
+
+      - name: Install modern CMake
+        shell: bash
+        run: |
+          set -euxo pipefail
+          wget -q --show-progress \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+            -O /tmp/cmake.tar.gz
+          tar -xzf /tmp/cmake.tar.gz -C /opt
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest" /usr/local/bin/ctest
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cpack" /usr/local/bin/cpack
+          cmake --version
 
       - name: Record toolchain versions
         shell: bash
@@ -104,16 +116,16 @@ jobs:
             python3 --version
           } 2>&1 | tee logs/toolchain.txt
 
-      - name: Download Qt source
+      - name: Download complete Qt source
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p "$QT_SRC"
           wget -q --show-progress \
-            "https://download.qt.io/official_releases/qt/6.10/${QT_VERSION}/submodules/qtbase-everywhere-src-${QT_VERSION}.tar.xz" \
-            -O qtbase.tar.xz
-          tar -xf qtbase.tar.xz -C "$QT_SRC" --strip-components=1
-          rm -f qtbase.tar.xz
+            "https://download.qt.io/official_releases/qt/6.10/${QT_VERSION}/single/qt-everywhere-src-${QT_VERSION}.tar.xz" \
+            -O qt.tar.xz
+          tar -xf qt.tar.xz -C "$QT_SRC" --strip-components=1
+          rm -f qt.tar.xz
 
       - name: Configure Qt
         shell: bash
@@ -133,7 +145,7 @@ jobs:
             -qt-libpng \
             -qt-libjpeg \
             -qt-freetype \
-            -no-openssl 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-configure.log"
+            -openssl-linked 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-configure.log"
 
       - name: Build Qt
         shell: bash
@@ -146,6 +158,14 @@ jobs:
         run: |
           set -o pipefail
           cmake --install "$QT_BUILD" 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-install.log"
+
+      - name: Verify Qt installation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -x "$QT_PREFIX/bin/qmake"
+          test -d "$QT_PREFIX/lib/cmake/Qt6"
+          "$QT_PREFIX/bin/qmake" --version 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-version.txt"
 
       - name: Package Qt artifact
         shell: bash
