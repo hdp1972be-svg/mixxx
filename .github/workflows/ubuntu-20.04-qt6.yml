@@ -154,6 +154,7 @@ jobs:
         env:
           PATH: /opt/qt/6.10.3/bin:${{ env.PATH }}
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
           CC: gcc-10
           CXX: g++-10
         run: |
@@ -178,6 +179,7 @@ jobs:
         env:
           PATH: /opt/qt/6.10.3/bin:${{ env.PATH }}
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
           CC: gcc-10
           CXX: g++-10
         run: |
@@ -187,6 +189,8 @@ jobs:
       - name: Run tests
         if: success()
         shell: bash
+        env:
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
         run: |
           set -o pipefail
           ctest --test-dir build --output-on-failure 2>&1 | tee logs/08-ctest.log
