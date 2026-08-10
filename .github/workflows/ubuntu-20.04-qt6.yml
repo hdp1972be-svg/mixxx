@@ -49,7 +49,7 @@ jobs:
 
           apt-get update 2>&1 | tee logs/01-apt-update.log
           apt-get install -y --no-install-recommends \
-            bash ca-certificates git wget curl xz-utils file pkg-config \
+            bash ca-certificates git wget curl xz-utils file pkg-config unzip \
             ninja-build build-essential python3 python3-pip sudo gdb \
             2>&1 | tee logs/02-base-packages.log
 
@@ -106,17 +106,44 @@ jobs:
             console.log(`Using Qt build run ${run.id}`);
 
       - name: Download Qt artifact
-        uses: actions/download-artifact@v4
+        id: download-qt
+        uses: actions/github-script@v9
+        env:
+          RUN_ID: ${{ steps.find-qt.outputs.run_id }}
         with:
-          name: qt-${{ env.QT_VERSION }}-ubuntu20.04
-          run-id: ${{ steps.find-qt.outputs.run_id }}
-          path: /tmp/qt-artifact
+          # download-artifact@v4 cannot fetch artifacts from a different
+          # workflow file (qt6-focal.yml) via run-id, so fetch the archive
+          # through the REST API instead.
+          script: |
+            const fs = require('fs');
+            const dir = '/tmp/qt-artifact';
+            fs.mkdirSync(dir, { recursive: true });
+            const artifactName = `qt-${process.env.QT_VERSION}-ubuntu20.04`;
+            const { data: list } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.RUN_ID),
+            });
+            const artifact = list.artifacts.find(a => a.name === artifactName);
+            if (!artifact) {
+              core.setFailed(`Artifact ${artifactName} not found on run ${process.env.RUN_ID}`);
+              return;
+            }
+            const { data } = await github.rest.actions.downloadArtifact({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              artifact_id: artifact.id,
+              archive_format: 'zip',
+            });
+            fs.writeFileSync(`${dir}/qt.zip`, Buffer.from(data));
+            console.log(`Downloaded ${artifactName} (${artifact.size_in_bytes} bytes) from run ${process.env.RUN_ID}`);
 
       - name: Install Qt artifact
         shell: bash
         run: |
           set -o pipefail
           cd /tmp/qt-artifact
+          unzip -o qt.zip
           sha256sum -c "qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256" 2>&1 | tee "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
           mkdir -p /opt/qt
           tar -C /opt/qt -xJf "qt-${QT_VERSION}-ubuntu20.04.tar.xz" 2>&1 | tee -a "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
