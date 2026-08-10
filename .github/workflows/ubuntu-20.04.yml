@@ -4,6 +4,11 @@ name: Ubuntu 20.04 Focal build
 
 on:
   push:
+    # Stale experiment: expects a pre-installed Qt that never exists in a
+    # fresh Focal container, so it always fails. Don't run it on every push
+    # (it only wastes the runner pool); trigger only when edited.
+    paths:
+      - '.github/workflows/ubuntu-20.04.yml'
   workflow_dispatch:
 
 permissions:
