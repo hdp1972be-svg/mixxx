@@ -133,6 +133,10 @@ jobs:
           set -o pipefail
           mkdir -p logs "$QT_BUILD"
           cd "$QT_BUILD"
+          # @anchor: qt6-focal:configure-openxr-off
+          # Disable the Quick3D XR/OpenXR module: on Ubuntu 20.04 the EGL headers pull in
+          # X11/Xlib.h, which #defines Bool as int and collides with
+          # QShaderDescription::VariableType::Bool in the qtquick3d XR sources.
           "$QT_SRC/configure" \
             -prefix "$QT_PREFIX" \
             -release \
@@ -145,7 +149,8 @@ jobs:
             -qt-libpng \
             -qt-libjpeg \
             -qt-freetype \
-            -openssl-linked 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-configure.log"
+            -openssl-linked \
+            INPUT_openxr=no 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-configure.log"
 
       - name: Build Qt
         shell: bash
