@@ -1,0 +1,142 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+
+name: Ubuntu 20.04 build
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Ubuntu 20.04 (focal)
+    runs-on: ubuntu-24.04
+    container: ubuntu:20.04
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Prepare build container
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs build
+          {
+            echo '=== OS ==='
+            cat /etc/os-release
+            echo
+            echo '=== Kernel ==='
+            uname -a
+            echo
+            echo '=== CPU ==='
+            nproc
+            echo
+            echo '=== Git ==='
+            git --version || true
+          } | tee logs/00-environment.log
+
+          apt-get update 2>&1 | tee logs/01-apt-update.log
+          apt-get install -y --no-install-recommends \
+            bash \
+            ca-certificates \
+            git \
+            sudo \
+            wget \
+            curl \
+            xz-utils \
+            file \
+            pkg-config \
+            ninja-build \
+            build-essential \
+            python3 \
+            python3-pip \
+            2>&1 | tee logs/02-base-packages.log
+
+      - name: Install Mixxx build dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x tools/debian_buildenv.sh
+          ./tools/debian_buildenv.sh setup 2>&1 | tee logs/03-mixxx-buildenv.log
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build
+          cmake \
+            -S . \
+            -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQT6=ON \
+            -DQML=ON \
+            -DBULK=ON \
+            -DFFMPEG=ON \
+            -DLOCALECOMPARE=ON \
+            -DMAD=ON \
+            -DMODPLUG=ON \
+            -DWAVPACK=ON \
+            -DINSTALL_USER_UDEV_RULES=OFF \
+            2>&1 | tee logs/04-cmake-configure.log
+
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build -j "$(nproc)" 2>&1 | tee logs/05-cmake-build.log
+
+      - name: Run tests
+        if: success()
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure 2>&1 | tee logs/06-ctest.log
+
+      - name: Package
+        if: success()
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --target package 2>&1 | tee logs/07-package.log
+
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '=== Git status ==='
+            git status --short
+            echo
+            echo '=== CMake cache ==='
+            if [ -f build/CMakeCache.txt ]; then
+              grep -E '^(CMAKE_(BUILD_TYPE|CXX_COMPILER|C_COMPILER):|QT6:|FFMPEG:)' build/CMakeCache.txt || true
+            fi
+            echo
+            echo '=== Built files ==='
+            find build -maxdepth 2 -type f \( -name '*.deb' -o -name 'mixxx' \) -print 2>/dev/null || true
+          } | tee logs/99-diagnostics.log
+
+      - name: Upload build logs and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-20.04-build-${{ github.run_number }}
+          path: |
+            logs/
+            build/*.deb
+            build/mixxx
+          if-no-files-found: warn
+          retention-days: 14
