@@ -245,7 +245,10 @@ jobs:
         run: |
           {
             echo '=== Git status ==='
-            git status --short
+            # The workspace root is a mount boundary inside the container, so
+            # git cannot always discover the repository. Diagnostics are best
+            # effort and must never fail the run.
+            git status --short 2>/dev/null || true
             echo
             echo '=== CMake cache ==='
             grep -E '^(CMAKE_(BUILD_TYPE|C_FLAGS_DEBUG|CXX_FLAGS_DEBUG|CXX_COMPILER|C_COMPILER):|QT6:|FFMPEG:)' build/CMakeCache.txt 2>/dev/null || true
