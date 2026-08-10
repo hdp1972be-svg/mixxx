@@ -185,6 +185,7 @@ jobs:
             -DMODPLUG=ON \
             -DWAVPACK=ON \
             -DBUILD_BENCH=OFF \
+            -DQTKEYCHAIN=OFF \
             -DINSTALL_USER_UDEV_RULES=OFF \
             2>&1 | tee logs/06-cmake-configure.log
 
