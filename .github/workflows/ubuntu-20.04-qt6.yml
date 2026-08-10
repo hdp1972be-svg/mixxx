@@ -144,9 +144,15 @@ jobs:
           set -o pipefail
           cd /tmp/qt-artifact
           unzip -o qt.zip
-          sha256sum -c "qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256" 2>&1 | tee "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+          # The sha256 sidecar records the path 'artifacts/...' from the
+          # upstream build, so verify by digest instead of sha256sum -c.
+          expected=$(awk '{print $1}' "qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256")
+          actual=$(sha256sum "qt-${QT_VERSION}-ubuntu20.04.tar.xz" | awk '{print $1}')
+          echo "expected: ${expected}"
+          echo "actual:   ${actual}"
+          test "${expected}" = "${actual}" || { echo "Qt artifact checksum mismatch" >&2; exit 1; }
           mkdir -p /opt/qt
-          tar -C /opt/qt -xJf "qt-${QT_VERSION}-ubuntu20.04.tar.xz" 2>&1 | tee -a "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+          tar -C /opt/qt -xJf "qt-${QT_VERSION}-ubuntu20.04.tar.xz" 2>&1 | tee "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
           "${QT_PREFIX}/bin/qmake" --version 2>&1 | tee -a "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
 
       - name: Configure
