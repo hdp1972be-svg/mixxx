@@ -93,7 +93,9 @@ jobs:
           set -o pipefail
           cmake \
             -S . -B build \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-g3 -O0 -fno-omit-frame-pointer" \
+            -DCMAKE_C_FLAGS="-g3 -O0 -fno-omit-frame-pointer" \            
             -DQT6=ON \
             -DQML=ON \
             -DBULK=ON \
@@ -103,7 +105,18 @@ jobs:
             -DMODPLUG=ON \
             -DWAVPACK=ON \
             -DINSTALL_USER_UDEV_RULES=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
             2>&1 | tee logs/06-cmake-configure.log
+
+      - name: Show compiler flags
+        shell: bash
+        run: |
+          echo "=== CMAKE CXX FLAGS ==="
+          grep -E 'CMAKE_CXX_FLAGS|CMAKE_C_FLAGS' build/CMakeCache.txt || true
+
+          echo
+          echo "=== Compile commands ==="
+          find build -name compile_commands.json -exec grep -m 5 -E 'soundsourceffmpeg.cpp' {} \; || true
 
       - name: Build
         shell: bash
@@ -150,3 +163,39 @@ jobs:
             build/mixxx
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Install
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --install build --prefix /opt/mixxx 2>&1 | tee logs/09-cmake-install.log
+
+      - name: Stage installed files
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -rf installed-mixxx
+          mkdir -p installed-mixxx
+          cp -a /opt/mixxx/. installed-mixxx/
+
+      - name: Upload installed Mixxx
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-20.04-focal-installed-${{ github.run_number }}
+          path: installed-mixxx/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Run tests2
+        if: success()
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure \
+            2>&1 | tee logs/10-ctest.log
+
+
+
+
