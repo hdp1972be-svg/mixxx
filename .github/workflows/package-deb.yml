@@ -1,0 +1,369 @@
+# Build the Mixxx Debian package (.deb) on Ubuntu 20.04 without recompiling.
+#
+# The expensive `-g3` debug compile already happens in the
+# "Ubuntu 20.04 Focal build (Qt 6 from artifact)" workflow. That workflow only
+# uploads `logs/`, `build/*.deb` and `build/mixxx` (see its upload step), so
+# here we download `build/mixxx`, configure a fresh build tree (needed for
+# CPackConfig.cmake / cmake_install.cmake), drop the prebuilt binary into it
+# and run `cpack -G DEB`. Translations are shipped from the committed `.qm`
+# files in `res/translations` (76 files), so no compile is required for them.
+#
+# cpack strips `build/mixxx` (CPACK_STRIP_FILES ON in CMakeLists.txt), so the
+# .deb ships a stripped binary; the -g3 symbols stay in the raw build artifact.
+
+name: Mixxx Debian package (Focal, from build artifacts)
+
+on:
+  workflow_run:
+    workflows: ["Ubuntu 20.04 Focal build (Qt 6 from artifact)"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Focal build run id/number to package (default: latest successful)"
+        required: false
+        type: string
+      qt_run_id:
+        description: "qt6-focal.yml run id with the Qt artifact (default: latest successful)"
+        required: false
+        type: string
+
+concurrency:
+  group: package-deb-${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  QT_VERSION: 6.10.3
+  QT_PREFIX: /opt/qt/6.10.3
+
+jobs:
+  package-deb:
+    name: Build Mixxx .deb (Focal)
+    runs-on: ubuntu-24.04
+    container: ubuntu:20.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+      CMAKE_VERSION: 3.31.8
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      # Resolve the Focal build run to package and the qt6-focal.yml run that
+      # produced the Qt artifact. On workflow_run we take the triggering run;
+      # on workflow_dispatch we take the latest successful run (or the run
+      # explicitly given via the inputs).
+      - name: Resolve build and Qt artifact runs
+        id: resolve
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const inputs = context.payload.inputs || {};
+
+            let buildRun;
+            if (context.eventName === 'workflow_run') {
+              buildRun = context.payload.workflow_run;
+            } else {
+              if (inputs.run_id) {
+                const { data: specific } = await github.rest.actions.getWorkflowRun({
+                  owner, repo, run_id: Number(inputs.run_id),
+                });
+                if (specific.conclusion !== 'success') {
+                  core.setFailed(`Focal build run ${inputs.run_id} did not succeed`);
+                  return;
+                }
+                buildRun = specific;
+              } else {
+                const list = await github.rest.actions.listWorkflowRuns({
+                  owner, repo,
+                  workflow_id: 'ubuntu-20.04-qt6.yml',
+                  status: 'success',
+                  per_page: 1,
+                });
+                if (list.data.total_count === 0) {
+                  core.setFailed('No successful ubuntu-20.04-qt6.yml run found; run that workflow first.');
+                  return;
+                }
+                buildRun = list.data.workflow_runs[0];
+              }
+            }
+
+            let qtRun;
+            if (inputs.qt_run_id) {
+              const { data: specific } = await github.rest.actions.getWorkflowRun({
+                owner, repo, run_id: Number(inputs.qt_run_id),
+              });
+              if (specific.conclusion !== 'success') {
+                core.setFailed(`qt6-focal.yml run ${inputs.qt_run_id} did not succeed`);
+                return;
+              }
+              qtRun = specific;
+            } else {
+              const list = await github.rest.actions.listWorkflowRuns({
+                owner, repo,
+                workflow_id: 'qt6-focal.yml',
+                status: 'success',
+                per_page: 1,
+              });
+              if (list.data.total_count === 0) {
+                core.setFailed('No successful qt6-focal.yml run found; run that workflow first.');
+                return;
+              }
+              qtRun = list.data.workflow_runs[0];
+            }
+
+            core.setOutput('build_run_id', String(buildRun.id));
+            core.setOutput('build_run_number', String(buildRun.run_number));
+            core.setOutput('build_sha', buildRun.head_sha);
+            core.setOutput('qt_run_id', String(qtRun.id));
+            console.log(`Packaging build run ${buildRun.run_number} (${buildRun.head_sha}); Qt from run ${qtRun.id}`);
+
+      # workflow_run sets GITHUB_SHA to the default branch head, so check out
+      # the exact commit the Focal build used. Full history is needed for
+      # GitInfo to resolve the package version from `git describe`.
+      - name: Checkout source at build commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.resolve.outputs.build_sha }}
+
+      - name: Record environment
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          {
+            echo '=== OS ==='
+            cat /etc/os-release
+            echo
+            echo '=== CPU ==='
+            nproc
+          } | tee logs/00-environment.log
+
+          apt-get update 2>&1 | tee logs/01-apt-update.log
+          apt-get install -y --no-install-recommends \
+            bash ca-certificates git wget curl xz-utils file pkg-config unzip \
+            ninja-build build-essential python3 python3-pip sudo gdb \
+            2>&1 | tee logs/02-base-packages.log
+
+      - name: Install CMake
+        shell: bash
+        run: |
+          set -o pipefail
+          wget -qO- "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+            | tar -xz -C /opt
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest" /usr/local/bin/ctest
+          cmake --version 2>&1 | tee logs/03-cmake-version.log
+
+      # Same Focal-compatible dependency set as the build workflow, plus the
+      # tools cpack -G DEB needs (debhelper + dh_* helpers, docbook-to-man for
+      # mixxx.1, markdown, debchange from devscripts).
+      - name: Install Mixxx build dependencies (Focal-compatible, no Qt)
+        shell: bash
+        run: |
+          set -o pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          cp tools/debian_buildenv.sh /tmp/debian_buildenv-focal.sh
+          apt-get install -y --no-install-recommends software-properties-common 2>&1 | tee logs/04-ppatools.log
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test 2>&1 | tee logs/04-ppa.log
+          apt-get update 2>&1 | tee logs/04-ppa-update.log
+          apt-get install -y --no-install-recommends gcc-12 g++-12 2>&1 | tee logs/04-focal-toolchain.log
+          apt-get install -y --no-install-recommends libxkbcommon-dev libxkbcommon-x11-dev 2>&1 | tee logs/04-xkbcommon.log
+          apt-get install -y --no-install-recommends libdbus-1-3 2>&1 | tee logs/04-dbus.log
+          sed -i \
+            -e '/libpipewire-0.3-dev/d' \
+            -e '/libspa-0.2-dev/d' \
+            -e '/libqt6/d' \
+            -e '/^ *qt6-/d' \
+            -e '/^ *qtkeychain-qt6-dev/d' \
+            -e '/^ *qml6-/d' \
+            -e '/qt6-shadertools-dev/d' \
+            -e '/qt6-5compat-dev/d' \
+            -e 's/sudo apt-get/apt-get/g' \
+            /tmp/debian_buildenv-focal.sh
+          chmod +x /tmp/debian_buildenv-focal.sh
+          /tmp/debian_buildenv-focal.sh setup 2>&1 | tee logs/04-mixxx-buildenv.log
+          apt-get install -y --no-install-recommends debhelper devscripts docbook-to-man markdown 2>&1 | tee logs/04-cpack-deb-tools.log
+
+      # Needed at configure time: Mixxx requires hidapi >= 0.14.0 but Focal
+      # only ships 0.9.0.
+      - name: Build hidapi 0.14.0 (Focal ships 0.9.0)
+        shell: bash
+        run: |
+          set -o pipefail
+          wget -q "https://github.com/libusb/hidapi/archive/refs/tags/hidapi-0.14.0.tar.gz" -O /tmp/hidapi.tar.gz
+          tar -xzf /tmp/hidapi.tar.gz -C /tmp
+          cmake -S /tmp/hidapi-hidapi-0.14.0 -B /tmp/hidapi-build \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DHIDAPI_BUILD_HIDTEST=OFF
+          cmake --build /tmp/hidapi-build -j"$(nproc)" 2>&1 | tee logs/05-hidapi-build.log
+          cmake --install /tmp/hidapi-build 2>&1 | tee logs/05-hidapi-install.log
+
+      # download-artifact@v4 cannot fetch artifacts from a different workflow
+      # file via run-id, so fetch the archives through the REST API instead
+      # (same approach as the build workflow's Qt download step).
+      - name: Download Qt artifact
+        id: download-qt
+        uses: actions/github-script@v9
+        env:
+          RUN_ID: ${{ steps.resolve.outputs.qt_run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const dir = '/tmp/qt-artifact';
+            fs.mkdirSync(dir, { recursive: true });
+            const artifactName = `qt-${process.env.QT_VERSION}-ubuntu20.04`;
+            const { data: list } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.RUN_ID),
+            });
+            const artifact = list.artifacts.find(a => a.name === artifactName);
+            if (!artifact) {
+              core.setFailed(`Artifact ${artifactName} not found on run ${process.env.RUN_ID}`);
+              return;
+            }
+            const { data } = await github.rest.actions.downloadArtifact({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              artifact_id: artifact.id,
+              archive_format: 'zip',
+            });
+            fs.writeFileSync(`${dir}/qt.zip`, Buffer.from(data));
+            console.log(`Downloaded ${artifactName} (${artifact.size_in_bytes} bytes) from run ${process.env.RUN_ID}`);
+
+      - name: Install Qt artifact
+        shell: bash
+        run: |
+          set -o pipefail
+          cd /tmp/qt-artifact
+          unzip -o qt.zip
+          expected=$(awk '{print $1}' "qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256")
+          actual=$(sha256sum "qt-${QT_VERSION}-ubuntu20.04.tar.xz" | awk '{print $1}')
+          echo "expected: ${expected}"
+          echo "actual:   ${actual}"
+          test "${expected}" = "${actual}" || { echo "Qt artifact checksum mismatch" >&2; exit 1; }
+          mkdir -p /opt/qt
+          tar -C /opt/qt -xJf "qt-${QT_VERSION}-ubuntu20.04.tar.xz" 2>&1 | tee "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+          "${QT_PREFIX}/bin/qmake" --version 2>&1 | tee -a "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+
+      - name: Download Focal build artifact (build/mixxx)
+        id: download-build
+        uses: actions/github-script@v9
+        env:
+          RUN_ID: ${{ steps.resolve.outputs.build_run_id }}
+          RUN_NUMBER: ${{ steps.resolve.outputs.build_run_number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const dir = '/tmp/mixxx-artifact';
+            fs.mkdirSync(dir, { recursive: true });
+            const artifactName = `ubuntu-20.04-qt6-${process.env.RUN_NUMBER}`;
+            const { data: list } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.RUN_ID),
+            });
+            const artifact = list.artifacts.find(a => a.name === artifactName);
+            if (!artifact) {
+              core.setFailed(`Artifact ${artifactName} not found on run ${process.env.RUN_ID}`);
+              return;
+            }
+            const { data } = await github.rest.actions.downloadArtifact({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              artifact_id: artifact.id,
+              archive_format: 'zip',
+            });
+            fs.writeFileSync(`${dir}/mixxx.zip`, Buffer.from(data));
+            console.log(`Downloaded ${artifactName} (${artifact.size_in_bytes} bytes) from run ${process.env.RUN_ID}`);
+
+      # Configure a fresh build tree (no compile). This is required so that
+      # CPackConfig.cmake and cmake_install.cmake exist for `cpack -G DEB`.
+      # The flags must match the Focal build workflow exactly so that GitInfo
+      # resolves the same package version from the same commit.
+      - name: Configure (no compile)
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          set -o pipefail
+          export PATH=/opt/qt/6.10.3/bin:$PATH
+          cmake \
+            -S . -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS_DEBUG=-g3 \
+            -DCMAKE_CXX_FLAGS_DEBUG=-g3 \
+            -DQT6=ON \
+            -DQML=ON \
+            -DBULK=ON \
+            -DFFMPEG=ON \
+            -DLOCALECOMPARE=ON \
+            -DMAD=ON \
+            -DMODPLUG=ON \
+            -DWAVPACK=ON \
+            -DBUILD_BENCH=OFF \
+            -DQTKEYCHAIN=OFF \
+            -DINSTALL_USER_UDEV_RULES=OFF \
+            2>&1 | tee logs/06-cmake-configure.log
+
+      # Drop the binary compiled by the Focal build workflow into the fresh
+      # tree so cpack's install(TARGETS mixxx) step finds it.
+      - name: Place prebuilt mixxx binary into build tree
+        shell: bash
+        run: |
+          set -o pipefail
+          cd /tmp/mixxx-artifact
+          unzip -o mixxx.zip
+          test -f build/mixxx || { echo "build/mixxx missing from build artifact" >&2; exit 1; }
+          cp build/mixxx "${GITHUB_WORKSPACE}/build/mixxx"
+          chmod +x "${GITHUB_WORKSPACE}/build/mixxx"
+          file "${GITHUB_WORKSPACE}/build/mixxx"
+
+      - name: Generate Mixxx Debian package
+        shell: bash
+        run: |
+          set -o pipefail
+          cd build
+          cpack -G DEB 2>&1 | tee ../logs/07-cpack-deb.log
+          ls -lh *.deb
+
+      - name: Verify .deb contents and metadata
+        shell: bash
+        run: |
+          set -o pipefail
+          cd build
+          for deb in mixxx-*.deb; do
+            echo "==== $deb ===="
+            dpkg-deb --info "$deb" 2>&1 | tee -a ../logs/08-dpkg-info.log
+            echo "---- contents ----"
+            dpkg-deb --contents "$deb" 2>&1 | tee -a ../logs/08-dpkg-contents.log
+          done
+
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          git status --short 2>/dev/null || true
+          grep -E '^(CMAKE_BUILD_TYPE|CPACK_PACKAGE_VERSION|CPACK_DEBIAN_INSTALL_SCRIPT|CPACK_STRIP_FILES):' build/CMakeCache.txt 2>/dev/null \
+            | tee logs/09-diagnostics.log
+          ls -lh build/mixxx-*.deb 2>/dev/null | tee -a logs/09-diagnostics.log
+
+      - name: Upload Mixxx .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixxx-deb-focal
+          path: |
+            build/*.deb
+            logs/
+          if-no-files-found: error
+          retention-days: 14
