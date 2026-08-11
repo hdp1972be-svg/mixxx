@@ -71,24 +71,12 @@ jobs:
         run: |
           set -o pipefail
           export DEBIAN_FRONTEND=noninteractive
-          # The current Mixxx buildenv asks Focal for Qt6 and PipeWire packages
-          # which do not exist there. Qt is supplied by the qt6-focal artifact.
           cp tools/debian_buildenv.sh /tmp/debian_buildenv-focal.sh
-          # GCC 10's C++20 concepts support is incomplete: constraint
-          # satisfaction on class-template member templates fails with
-          # "is_enum_v used in its own initializer". Focal has no gcc-11+,
-          # so pull gcc-12 from the ubuntu-toolchain-r/test PPA. The PPA is
-          # still explicitly the Focal archive; it is not a Jammy/Noble repo.
           apt-get install -y --no-install-recommends software-properties-common 2>&1 | tee logs/04-ppatools.log
           add-apt-repository -y ppa:ubuntu-toolchain-r/test 2>&1 | tee logs/04-ppa.log
           apt-get update 2>&1 | tee logs/04-ppa-update.log
           apt-get install -y --no-install-recommends gcc-12 g++-12 2>&1 | tee logs/04-focal-toolchain.log
-          # The custom-built Qt 6.10 enables xkbcommon, so Qt6GuiPrivate
-          # needs libxkbcommon-dev present at Mixxx build time. Focal ships
-          # xkbcommon 0.9.1 (>= the required 0.9.0).
           apt-get install -y --no-install-recommends libxkbcommon-dev libxkbcommon-x11-dev 2>&1 | tee logs/04-xkbcommon.log
-          # Qt's qsb shader baker is invoked during the build and needs the
-          # dbus runtime library, which our Qt6 deb filtering removes.
           apt-get install -y --no-install-recommends libdbus-1-3 2>&1 | tee logs/04-dbus.log
           sed -i \
             -e '/libpipewire-0.3-dev/d' \
@@ -129,11 +117,6 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          # Mixxx needs hidapi >= 0.14.0 for controller bus-type info, but Focal
-          # only ships 0.9.0. Build it inside the Focal container and install it
-          # into /usr/local. The loader cache must then be refreshed: otherwise
-          # the linker can use /usr/local/lib during the build while the runtime
-          # loader still resolves the older Focal /usr/lib copy.
           wget -q "https://github.com/libusb/hidapi/archive/refs/tags/hidapi-0.14.0.tar.gz" -O /tmp/hidapi.tar.gz
           tar -xzf /tmp/hidapi.tar.gz -C /tmp
           cmake -S /tmp/hidapi-hidapi-0.14.0 -B /tmp/hidapi-build \
@@ -276,6 +259,35 @@ jobs:
           export PATH=/opt/qt/6.10.3/bin:$PATH
           cmake --build build -j"$(nproc)" 2>&1 | tee logs/07-cmake-build.log
 
+      - name: Install Mixxx runtime tree
+        if: success()
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          set -o pipefail
+          export PATH=/opt/qt/6.10.3/bin:$PATH
+          rm -rf "$GITHUB_WORKSPACE/install"
+          mkdir -p "$GITHUB_WORKSPACE/install"
+          cmake --install build --prefix "$GITHUB_WORKSPACE/install" \
+            2>&1 | tee logs/08-cmake-install.log
+          echo '=== Installed runtime tree ==='
+          find "$GITHUB_WORKSPACE/install" -type f -printf '%P\n' \
+            | sort | tee logs/08-install-tree.log
+          echo '=== Runtime directories ==='
+          find "$GITHUB_WORKSPACE/install" -type d \
+            \( -name skins -o -name translations -o -name controllers \) \
+            -print | tee logs/08-runtime-directories.log
+          echo '=== Install manifest ==='
+          if [ -f build/install_manifest.txt ]; then
+            cat build/install_manifest.txt | tee logs/08-install-manifest.log
+          else
+            echo 'No build/install_manifest.txt found' | tee logs/08-install-manifest.log
+          fi
+
       - name: Verify resulting binary dependencies
         if: success()
         shell: bash
@@ -298,8 +310,8 @@ jobs:
             echo
             echo '=== GLIBC / GLIBCXX requirements ==='
             objdump -T build/mixxx 2>/dev/null | grep -oE 'GLIBCXX_[0-9.]+|GLIBC_[0-9.]+' | sort -Vu | tail -30 || true
-          } | tee logs/08-binary-dependencies.log
-          ldd build/mixxx 2>&1 | tee logs/08-ldd.log
+          } | tee logs/09-binary-dependencies.log
+          ldd build/mixxx 2>&1 | tee logs/09-ldd.log
 
       - name: Run tests
         if: success()
@@ -309,9 +321,9 @@ jobs:
         run: |
           set -o pipefail
           if compgen -G "build/mixxx-test*" >/dev/null; then
-            ctest --test-dir build --output-on-failure 2>&1 | tee logs/09-ctest.log
+            ctest --test-dir build --output-on-failure 2>&1 | tee logs/10-ctest.log
           else
-            echo "No test targets built; skipping ctest" | tee logs/09-ctest.log
+            echo "No test targets built; skipping ctest" | tee logs/10-ctest.log
           fi
 
       - name: Collect diagnostics
@@ -333,9 +345,12 @@ jobs:
             echo
             echo '=== Built files ==='
             find build -maxdepth 3 -type f \( -name '*.deb' -o -name 'mixxx' \) -print 2>/dev/null || true
+            echo
+            echo '=== Install tree ==='
+            find install -maxdepth 4 -type f -print 2>/dev/null | sort || true
           } | tee logs/99-diagnostics.log
 
-      - name: Upload build logs and artifacts
+      - name: Upload build logs and binary artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -345,4 +360,15 @@ jobs:
             build/*.deb
             build/mixxx
           if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload CMake build and install tree
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-20.04-qt6-build-install-${{ github.run_number }}
+          path: |
+            build/
+            install/
+          if-no-files-found: error
           retention-days: 14
