@@ -45,6 +45,9 @@ jobs:
             echo
             echo '=== CPU ==='
             nproc
+            echo
+            echo '=== APT sources ==='
+            grep -RhsE '^[[:space:]]*deb([[:space:]]|$)' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true
           } | tee logs/00-environment.log
 
           apt-get update 2>&1 | tee logs/01-apt-update.log
@@ -74,7 +77,8 @@ jobs:
           # GCC 10's C++20 concepts support is incomplete: constraint
           # satisfaction on class-template member templates fails with
           # "is_enum_v used in its own initializer". Focal has no gcc-11+,
-          # so pull gcc-12 from the ubuntu-toolchain-r/test PPA.
+          # so pull gcc-12 from the ubuntu-toolchain-r/test PPA. The PPA is
+          # still explicitly the Focal archive; it is not a Jammy/Noble repo.
           apt-get install -y --no-install-recommends software-properties-common 2>&1 | tee logs/04-ppatools.log
           add-apt-repository -y ppa:ubuntu-toolchain-r/test 2>&1 | tee logs/04-ppa.log
           apt-get update 2>&1 | tee logs/04-ppa-update.log
@@ -100,20 +104,56 @@ jobs:
           chmod +x /tmp/debian_buildenv-focal.sh
           /tmp/debian_buildenv-focal.sh setup 2>&1 | tee logs/04-mixxx-buildenv.log
 
+      - name: Record Focal package provenance
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            echo '=== dpkg architecture ==='
+            dpkg --print-architecture
+            echo
+            echo '=== Installed compiler ==='
+            gcc-12 --version || true
+            g++-12 --version || true
+            echo
+            echo '=== Key runtime/development packages ==='
+            dpkg-query -W -f='${Package}\t${Version}\n' \
+              libc6 libstdc++6 libgcc-s1 zlib1g libssl1.1 libhidapi-hidraw0 \
+              libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 2>/dev/null || true
+            echo
+            echo '=== APT policy ==='
+            apt-cache policy libc6 libstdc++6 libgcc-s1 libhidapi-hidraw0 2>/dev/null || true
+          } | tee logs/04-package-provenance.log
+
       - name: Build hidapi 0.14.0 (Focal ships 0.9.0)
         shell: bash
         run: |
           set -o pipefail
           # Mixxx needs hidapi >= 0.14.0 for controller bus-type info, but Focal
-          # only ships 0.9.0. The 0.14.0 GitHub release ships no source tarball,
-          # so pull the tag archive from codeload; its CMake install drops
-          # hidapiConfig.cmake into /usr/local/lib/cmake/hidapi.
+          # only ships 0.9.0. Build it inside the Focal container and install it
+          # into /usr/local. The loader cache must then be refreshed: otherwise
+          # the linker can use /usr/local/lib during the build while the runtime
+          # loader still resolves the older Focal /usr/lib copy.
           wget -q "https://github.com/libusb/hidapi/archive/refs/tags/hidapi-0.14.0.tar.gz" -O /tmp/hidapi.tar.gz
           tar -xzf /tmp/hidapi.tar.gz -C /tmp
           cmake -S /tmp/hidapi-hidapi-0.14.0 -B /tmp/hidapi-build \
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DHIDAPI_BUILD_HIDTEST=OFF
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DHIDAPI_BUILD_HIDTEST=OFF \
+            2>&1 | tee logs/05-hidapi-configure.log
           cmake --build /tmp/hidapi-build -j"$(nproc)" 2>&1 | tee logs/05-hidapi-build.log
           cmake --install /tmp/hidapi-build 2>&1 | tee logs/05-hidapi-install.log
+          ldconfig
+          {
+            echo '=== hidapi loader cache ==='
+            ldconfig -p | grep -E 'libhidapi-hidraw\.so\.0' || true
+            echo
+            echo '=== hidapi exports ==='
+            nm -D /usr/local/lib/libhidapi-hidraw.so.0 2>/dev/null | grep ' hid_get_report_descriptor$' || true
+            echo
+            echo '=== installed hidapi files ==='
+            find /usr/local/lib -maxdepth 2 -name 'libhidapi*' -o -name '*hidapi*cmake*' 2>/dev/null | sort || true
+          } | tee logs/05-hidapi-runtime.log
+          test -x /usr/local/bin/hidtest-libusb || true
+          nm -D /usr/local/lib/libhidapi-hidraw.so.0 | grep -q ' hid_get_report_descriptor$'
 
       - name: Find Qt artifact build
         id: find-qt
@@ -140,9 +180,6 @@ jobs:
         env:
           RUN_ID: ${{ steps.find-qt.outputs.run_id }}
         with:
-          # download-artifact@v4 cannot fetch artifacts from a different
-          # workflow file (qt6-focal.yml) via run-id, so fetch the archive
-          # through the REST API instead.
           script: |
             const fs = require('fs');
             const dir = '/tmp/qt-artifact';
@@ -173,8 +210,6 @@ jobs:
           set -o pipefail
           cd /tmp/qt-artifact
           unzip -o qt.zip
-          # The sha256 sidecar records the path 'artifacts/...' from the
-          # upstream build, so verify by digest instead of sha256sum -c.
           expected=$(awk '{print $1}' "qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256")
           actual=$(sha256sum "qt-${QT_VERSION}-ubuntu20.04.tar.xz" | awk '{print $1}')
           echo "expected: ${expected}"
@@ -187,15 +222,13 @@ jobs:
       - name: Configure
         shell: bash
         env:
-          CMAKE_PREFIX_PATH: /opt/qt/6.10.3
-          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
           CC: gcc-12
           CXX: g++-12
         run: |
           set -o pipefail
           export PATH=/opt/qt/6.10.3/bin:$PATH
-          # Debug build with -g3 (CMake's Debug default is -g): keeps macro
-          # definitions and full local/parameter info for gdb sessions.
           cmake \
             -S . -B build \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -214,29 +247,71 @@ jobs:
             -DINSTALL_USER_UDEV_RULES=OFF \
             2>&1 | tee logs/06-cmake-configure.log
 
+      - name: Verify Mixxx dependency resolution before build
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
+        run: |
+          set -o pipefail
+          {
+            echo '=== CMake compiler ==='
+            grep -E '^(CMAKE_(C|CXX)_COMPILER|CMAKE_(C|CXX)_COMPILER_VERSION):' build/CMakeCache.txt || true
+            echo
+            echo '=== hidapi selected by linker/CMake ==='
+            grep -RniE 'hidapi|HIDAPI' build/CMakeCache.txt build/CMakeFiles 2>/dev/null | head -100 || true
+            echo
+            echo '=== Available hidapi symbols ==='
+            nm -D /usr/local/lib/libhidapi-hidraw.so.0 | grep ' hid_get_report_descriptor$' || true
+          } | tee logs/06-dependency-resolution.log
+
       - name: Build
         shell: bash
         env:
-          CMAKE_PREFIX_PATH: /opt/qt/6.10.3
-          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
           CC: gcc-12
           CXX: g++-12
         run: |
           set -o pipefail
           export PATH=/opt/qt/6.10.3/bin:$PATH
-          cmake --build build -j "$(nproc)" 2>&1 | tee logs/07-cmake-build.log
+          cmake --build build -j"$(nproc)" 2>&1 | tee logs/07-cmake-build.log
+
+      - name: Verify resulting binary dependencies
+        if: success()
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
+        run: |
+          set -o pipefail
+          {
+            echo '=== NEEDED ==='
+            readelf -d build/mixxx 2>/dev/null | grep NEEDED || true
+            echo
+            echo '=== RUNPATH/RPATH ==='
+            readelf -d build/mixxx 2>/dev/null | grep -E 'RPATH|RUNPATH' || true
+            echo
+            echo '=== hidapi resolution ==='
+            ldd build/mixxx 2>/dev/null | grep -i hidapi || true
+            echo
+            echo '=== unresolved symbols ==='
+            nm -D build/mixxx 2>/dev/null | grep ' U ' | grep -E 'hid_|Q[A-Za-z]' | head -100 || true
+            echo
+            echo '=== GLIBC / GLIBCXX requirements ==='
+            objdump -T build/mixxx 2>/dev/null | grep -oE 'GLIBCXX_[0-9.]+|GLIBC_[0-9.]+' | sort -Vu | tail -30 || true
+          } | tee logs/08-binary-dependencies.log
+          ldd build/mixxx 2>&1 | tee logs/08-ldd.log
 
       - name: Run tests
         if: success()
         shell: bash
         env:
-          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
         run: |
           set -o pipefail
           if compgen -G "build/mixxx-test*" >/dev/null; then
-            ctest --test-dir build --output-on-failure 2>&1 | tee logs/08-ctest.log
+            ctest --test-dir build --output-on-failure 2>&1 | tee logs/09-ctest.log
           else
-            echo "No test targets built (BUILD_TESTING=OFF: Focal libgtest-dev ships no GTest CONFIG package); skipping ctest"
+            echo "No test targets built; skipping ctest" | tee logs/09-ctest.log
           fi
 
       - name: Collect diagnostics
@@ -245,9 +320,6 @@ jobs:
         run: |
           {
             echo '=== Git status ==='
-            # The workspace root is a mount boundary inside the container, so
-            # git cannot always discover the repository. Diagnostics are best
-            # effort and must never fail the run.
             git status --short 2>/dev/null || true
             echo
             echo '=== CMake cache ==='
@@ -255,6 +327,9 @@ jobs:
             echo
             echo '=== Qt ==='
             "${QT_PREFIX}/bin/qmake" --version 2>/dev/null || true
+            echo
+            echo '=== Toolchain ==='
+            gcc-12 --version 2>/dev/null || true
             echo
             echo '=== Built files ==='
             find build -maxdepth 3 -type f \( -name '*.deb' -o -name 'mixxx' \) -print 2>/dev/null || true
