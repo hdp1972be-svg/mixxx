@@ -1,5 +1,7 @@
 # Build Qt 6.10.3 against Ubuntu 20.04 (Focal) and publish it as an artifact.
 # The artifact can subsequently be consumed by the Focal Mixxx build.
+# Also publishes a rolling GitHub release (tag `qt6-focal`) with the Qt
+# tarball; the Mixxx .deb is attached later by package-deb.yml.
 
 name: Qt 6.10.3 - Ubuntu 20.04
 
@@ -14,7 +16,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: qt6-focal-${{ github.ref }}
@@ -189,6 +191,30 @@ jobs:
           name: qt-${{ env.QT_VERSION }}-ubuntu20.04
           path: artifacts/
           retention-days: 14
+
+      # Publish the Qt tarball to the rolling `qt6-focal` release. The tag is
+      # stable, so every successful run updates the same release in place
+      # (assets are overwritten); GitHub artifacts expire after 14 days here,
+      # the release download link does not.
+      # @anchor: qt6-focal:publish-rolling-release
+      - name: Publish rolling GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: qt6-focal
+          name: Qt 6 for Ubuntu 20.04
+          body: |
+            Qt ${{ env.QT_VERSION }} built for Ubuntu 20.04 (Focal) from source.
+
+            ## Contents
+            - `qt-${{ env.QT_VERSION }}-ubuntu20.04.tar.xz` — prebuilt Qt install tree
+            - `qt-${{ env.QT_VERSION }}-ubuntu20.04.tar.xz.sha256` — checksum
+            - `mixxx-*.deb` — Mixxx Debian package, attached by the package-deb workflow
+          files: |
+            artifacts/qt-${{ env.QT_VERSION }}-ubuntu20.04.tar.xz
+            artifacts/qt-${{ env.QT_VERSION }}-ubuntu20.04.tar.xz.sha256
+          target_commitish: ${{ github.sha }}
+          overwrite_files: true
+          make_latest: true
 
       - name: Upload build logs
         if: always()

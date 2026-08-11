@@ -33,7 +33,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 env:
@@ -347,6 +347,17 @@ jobs:
             echo "---- contents ----"
             dpkg-deb --contents "$deb" 2>&1 | tee -a ../logs/08-dpkg-contents.log
           done
+
+      # Attach the .deb to the rolling `qt6-focal` release published by
+      # qt6-focal.yml. No body/name here so the existing release keeps its
+      # "Qt 6 for Ubuntu 20.04" info; only the asset is (over)written.
+      # @anchor: package-deb:attach-deb-to-release
+      - name: Attach .deb to rolling GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: qt6-focal
+          files: build/*.deb
+          overwrite_files: true
 
       - name: Collect diagnostics
         if: always()
