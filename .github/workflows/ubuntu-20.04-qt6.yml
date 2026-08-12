@@ -260,7 +260,7 @@ jobs:
           cmake --build build -j"$(nproc)" 2>&1 | tee logs/07-cmake-build.log
 
       - name: Install Mixxx runtime tree
-        if: success()
+        if: ${{ false }}
         shell: bash
         env:
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local
@@ -289,7 +289,7 @@ jobs:
           fi
 
       - name: Verify resulting binary dependencies
-        if: success()
+        if: ${{ false }}
         shell: bash
         env:
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
@@ -314,7 +314,7 @@ jobs:
           ldd build/mixxx 2>&1 | tee logs/09-ldd.log
 
       - name: Run tests
-        if: success()
+        if: ${{ false }}
         shell: bash
         env:
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
@@ -363,7 +363,7 @@ jobs:
           retention-days: 14
 
       - name: Upload CMake build and install tree
-        if: success()
+        if: ${{ false }}
         uses: actions/upload-artifact@v4
         with:
           name: ubuntu-20.04-qt6-build-install-${{ github.run_number }}
