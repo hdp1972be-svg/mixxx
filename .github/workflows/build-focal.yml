@@ -1,7 +1,8 @@
 name: Build Mixxx on Ubuntu 20.04 (Focal)
 
 on:
-  push:
+  # Build on tag push or manual trigger — not on every push to avoid
+  # wasting runner capacity when only source files change.
   tags:
     - '*'
   workflow_dispatch:
