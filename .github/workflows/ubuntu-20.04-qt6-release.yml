@@ -1,0 +1,371 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+name: Ubuntu 20.04 Focal release packaging (Qt 6 from artifact)
+
+# Manual trigger only: packaging happens on demand, not on every push.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  QT_VERSION: 6.10.3
+  QT_PREFIX: /opt/qt/6.10.3
+  MIXXX_INSTALL_PREFIX: /opt/mixxx
+
+jobs:
+  package:
+    name: Ubuntu 20.04 (Focal) release package
+    runs-on: ubuntu-24.04
+    container: ubuntu:20.04
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+      CMAKE_VERSION: 3.31.8
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Prepare Focal build environment
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs build
+          {
+            echo '=== OS ==='
+            cat /etc/os-release
+            echo
+            echo '=== Kernel ==='
+            uname -a
+            echo
+            echo '=== CPU ==='
+            nproc
+            echo
+            echo '=== APT sources ==='
+            grep -RhsE '^[[:space:]]*deb([[:space:]]|$)' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true
+          } | tee logs/00-environment.log
+
+          apt-get update 2>&1 | tee logs/01-apt-update.log
+          apt-get install -y --no-install-recommends \
+            bash ca-certificates git wget curl xz-utils file pkg-config unzip \
+            ninja-build build-essential python3 python3-pip sudo gdb \
+            2>&1 | tee logs/02-base-packages.log
+
+      - name: Install CMake
+        shell: bash
+        run: |
+          set -o pipefail
+          wget -qO- "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+            | tar -xz -C /opt
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest" /usr/local/bin/ctest
+          cmake --version 2>&1 | tee logs/03-cmake-version.log
+
+      - name: Install Mixxx build dependencies (Focal-compatible, no Qt)
+        shell: bash
+        run: |
+          set -o pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          cp tools/debian_buildenv.sh /tmp/debian_buildenv-focal.sh
+          apt-get install -y --no-install-recommends software-properties-common 2>&1 | tee logs/04-ppatools.log
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test 2>&1 | tee logs/04-ppa.log
+          apt-get update 2>&1 | tee logs/04-ppa-update.log
+          apt-get install -y --no-install-recommends gcc-12 g++-12 2>&1 | tee logs/04-focal-toolchain.log
+          apt-get install -y --no-install-recommends libxkbcommon-dev libxkbcommon-x11-dev 2>&1 | tee logs/04-xkbcommon.log
+          apt-get install -y --no-install-recommends libdbus-1-3 2>&1 | tee logs/04-dbus.log
+          sed -i \
+            -e '/libpipewire-0.3-dev/d' \
+            -e '/libspa-0.2-dev/d' \
+            -e '/libqt6/d' \
+            -e '/^ *qt6-/d' \
+            -e '/^ *qtkeychain-qt6-dev/d' \
+            -e '/^ *qml6-/d' \
+            -e '/qt6-shadertools-dev/d' \
+            -e '/qt6-5compat-dev/d' \
+            -e 's/sudo apt-get/apt-get/g' \
+            /tmp/debian_buildenv-focal.sh
+          chmod +x /tmp/debian_buildenv-focal.sh
+          /tmp/debian_buildenv-focal.sh setup 2>&1 | tee logs/04-mixxx-buildenv.log
+
+      - name: Record Focal package provenance
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            echo '=== dpkg architecture ==='
+            dpkg --print-architecture
+            echo
+            echo '=== Installed compiler ==='
+            gcc-12 --version || true
+            g++-12 --version || true
+            echo
+            echo '=== Key runtime/development packages ==='
+            dpkg-query -W -f='${Package}\t${Version}\n' \
+              libc6 libstdc++6 libgcc-s1 zlib1g libssl1.1 libhidapi-hidraw0 \
+              libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 2>/dev/null || true
+          } | tee logs/04-package-provenance.log
+
+      - name: Build hidapi 0.14.0 (Focal ships 0.9.0)
+        shell: bash
+        run: |
+          set -o pipefail
+          wget -q "https://github.com/libusb/hidapi/archive/refs/tags/hidapi-0.14.0.tar.gz" -O /tmp/hidapi.tar.gz
+          tar -xzf /tmp/hidapi.tar.gz -C /tmp
+          cmake -S /tmp/hidapi-hidapi-0.14.0 -B /tmp/hidapi-build \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DHIDAPI_BUILD_HIDTEST=OFF \
+            2>&1 | tee logs/05-hidapi-configure.log
+          cmake --build /tmp/hidapi-build -j"$(nproc)" 2>&1 | tee logs/05-hidapi-build.log
+          cmake --install /tmp/hidapi-build 2>&1 | tee logs/05-hidapi-install.log
+          ldconfig
+          nm -D /usr/local/lib/libhidapi-hidraw.so.0 | grep -q ' hid_get_report_descriptor$'
+
+      - name: Find Qt artifact build
+        id: find-qt
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'qt6-focal.yml',
+              status: 'success',
+              per_page: 1,
+            });
+            if (data.total_count === 0) {
+              core.setFailed('No successful qt6-focal.yml run found; run that workflow first.');
+            }
+            const run = data.workflow_runs[0];
+            core.setOutput('run_id', String(run.id));
+            console.log(`Using Qt build run ${run.id}`);
+
+      - name: Download Qt artifact
+        id: download-qt
+        uses: actions/github-script@v9
+        env:
+          RUN_ID: ${{ steps.find-qt.outputs.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const dir = '/tmp/qt-artifact';
+            fs.mkdirSync(dir, { recursive: true });
+            const artifactName = `qt-${process.env.QT_VERSION}-ubuntu20.04`;
+            const { data: list } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.RUN_ID),
+            });
+            const artifact = list.artifacts.find(a => a.name === artifactName);
+            if (!artifact) {
+              core.setFailed(`Artifact ${artifactName} not found on run ${process.env.RUN_ID}`);
+              return;
+            }
+            const { data } = await github.rest.actions.downloadArtifact({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              artifact_id: artifact.id,
+              archive_format: 'zip',
+            });
+            fs.writeFileSync(`${dir}/qt.zip`, Buffer.from(data));
+            console.log(`Downloaded ${artifactName} (${artifact.size_in_bytes} bytes) from run ${process.env.RUN_ID}`);
+
+      - name: Install Qt artifact
+        shell: bash
+        run: |
+          set -o pipefail
+          cd /tmp/qt-artifact
+          unzip -o qt.zip
+          expected=$(awk '{print $1}' "qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256")
+          actual=$(sha256sum "qt-${QT_VERSION}-ubuntu20.04.tar.xz" | awk '{print $1}')
+          echo "expected: ${expected}"
+          echo "actual:   ${actual}"
+          test "${expected}" = "${actual}" || { echo "Qt artifact checksum mismatch" >&2; exit 1; }
+          mkdir -p /opt/qt
+          tar -C /opt/qt -xJf "qt-${QT_VERSION}-ubuntu20.04.tar.xz" 2>&1 | tee "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+          "${QT_PREFIX}/bin/qmake" --version 2>&1 | tee -a "${GITHUB_WORKSPACE}/logs/05-qt-install.log"
+
+      - name: Configure (Release)
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          set -o pipefail
+          export PATH=/opt/qt/6.10.3/bin:$PATH
+          cmake \
+            -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQT6=ON \
+            -DQML=ON \
+            -DBULK=ON \
+            -DFFMPEG=ON \
+            -DLOCALECOMPARE=ON \
+            -DMAD=ON \
+            -DMODPLUG=ON \
+            -DWAVPACK=ON \
+            -DBUILD_BENCH=OFF \
+            -DQTKEYCHAIN=OFF \
+            -DINSTALL_USER_UDEV_RULES=OFF \
+            2>&1 | tee logs/06-cmake-configure.log
+
+      - name: Build (Release)
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          set -o pipefail
+          export PATH=/opt/qt/6.10.3/bin:$PATH
+          cmake --build build -j"$(nproc)" 2>&1 | tee logs/07-cmake-build.log
+
+      - name: Install Mixxx runtime tree
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          set -o pipefail
+          export PATH=/opt/qt/6.10.3/bin:$PATH
+          rm -rf "${MIXXX_INSTALL_PREFIX}"
+          cmake --install build --prefix "${MIXXX_INSTALL_PREFIX}" \
+            2>&1 | tee logs/08-cmake-install.log
+          echo '=== Installed runtime tree ==='
+          find "${MIXXX_INSTALL_PREFIX}" -type f -printf '%P\n' \
+            | sort | tee logs/08-install-tree.log
+
+      - name: Verify resulting binary dependencies
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib
+        run: |
+          set -o pipefail
+          {
+            echo '=== NEEDED ==='
+            readelf -d build/mixxx 2>/dev/null | grep NEEDED || true
+            echo
+            echo '=== RUNPATH/RPATH ==='
+            readelf -d build/mixxx 2>/dev/null | grep -E 'RPATH|RUNPATH' || true
+            echo
+            echo '=== hidapi resolution ==='
+            ldd build/mixxx 2>/dev/null | grep -i hidapi || true
+            echo
+            echo '=== GLIBC / GLIBCXX requirements ==='
+            objdump -T build/mixxx 2>/dev/null | grep -oE 'GLIBCXX_[0-9.]+|GLIBC_[0-9.]+' | sort -Vu | tail -30 || true
+          } | tee logs/09-binary-dependencies.log
+          ldd build/mixxx 2>&1 | tee logs/09-ldd.log
+
+      - name: Package release tarball (zip) and Debian package
+        shell: bash
+        run: |
+          set -o pipefail
+          cd "${GITHUB_WORKSPACE}"
+
+          # Version from CMakeLists.txt: 2.7.0-alpha-CUSTOM-MKV
+          VER=$(sed -n 's/^project(mixxx VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          PRE=$(sed -n 's/^set(MIXXX_VERSION_PRERELEASE "\([^"]*\)".*/\1/p' CMakeLists.txt)
+          MIXXX_VERSION="${VER}${PRE:+-${PRE}}"
+          echo "MIXXX_VERSION=${MIXXX_VERSION}"
+
+          # Debian policy: no hyphens in version (hyphen = upstream/debian split)
+          DEB_VER=$(echo "${MIXXX_VERSION}" | tr '-' '~')
+          echo "DEB_VER=${DEB_VER}"
+
+          # Bundle hidapi 0.14.0 (Focal ships 0.9.0, too old for Mixxx)
+          mkdir -p "${MIXXX_INSTALL_PREFIX}/lib"
+          cp -a /usr/local/lib/libhidapi-hidraw.so.0* "${MIXXX_INSTALL_PREFIX}/lib/"
+
+          # Strip debug symbols from the release binary and bundled libs
+          strip --strip-unneeded "${MIXXX_INSTALL_PREFIX}/bin/mixxx"
+          strip --strip-unneeded "${MIXXX_INSTALL_PREFIX}/lib"/*.so.0* 2>/dev/null || true
+
+          # Launcher: checks Qt runtime via QT_PREFIX, overridable by env var
+          cat > "${MIXXX_INSTALL_PREFIX}/bin/mixxx-run" <<'EOF'
+          #!/usr/bin/env bash
+          # Launcher for the Mixxx release package (Ubuntu 20.04, Qt 6.10.3 external).
+          # Qt is NOT bundled; point QT_PREFIX to an existing Qt 6.10.3 install.
+          set -euo pipefail
+          QT_PREFIX="${QT_PREFIX:-/opt/qt/6.10.3}"
+          if [ ! -d "${QT_PREFIX}/lib" ] || [ ! -x "${QT_PREFIX}/bin/qmake" ]; then
+            echo "Mixxx: Qt 6.10.3 runtime not found at '${QT_PREFIX}'." >&2
+            echo "Install Qt 6.10.3 there or set QT_PREFIX to override." >&2
+            exit 1
+          fi
+          export LD_LIBRARY_PATH="${MIXXX_INSTALL_PREFIX}/lib:${QT_PREFIX}/lib:${QT_PREFIX}/plugins${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          exec "${MIXXX_INSTALL_PREFIX}/bin/mixxx" "$@"
+          EOF
+          chmod +x "${MIXXX_INSTALL_PREFIX}/bin/mixxx-run"
+
+          # Debian package layout (absolute symlink /usr/bin/mixxx -> launcher)
+          rm -rf deb pkg && mkdir -p pkg
+          mkdir -p deb/DEBIAN deb/usr/bin
+          cp -a "${MIXXX_INSTALL_PREFIX}" deb/opt/
+          ln -s /opt/mixxx/bin/mixxx-run deb/usr/bin/mixxx
+
+          INSTALLED_SIZE=$(du -sk deb/opt/mixxx | cut -f1)
+          cat > deb/DEBIAN/control <<EOF
+          Package: mixxx
+          Version: ${DEB_VER}
+          Architecture: amd64
+          Maintainer: Mixxx release packaging <mixxx@mixxx.org>
+          Installed-Size: ${INSTALLED_SIZE}
+          Depends: libc6, libstdc++6, libgcc-s1, zlib1g, libssl1.1, libxkbcommon0, libxkbcommon-x11-0, libdbus-1-3
+          Section: sound
+          Priority: optional
+          Homepage: https://mixxx.org
+          Description: Mixxx ${MIXXX_VERSION} (Ubuntu 20.04 / Qt 6.10.3)
+           Mixxx DJ mixing software, custom release build.
+           Requires an external Qt 6.10.3 runtime at /opt/qt/6.10.3 (not bundled).
+           Override the Qt location with the QT_PREFIX environment variable.
+          EOF
+
+          dpkg-deb --build --root-owner-group deb "pkg/mixxx_${DEB_VER}_amd64.deb" 2>&1 | tee logs/10-deb.log
+
+          # Zip keeps the opt/ prefix so extraction to / yields /opt/mixxx
+          rm -rf ziproot && mkdir -p ziproot/opt
+          cp -a "${MIXXX_INSTALL_PREFIX}" ziproot/opt/
+          (cd ziproot && zip -qry "${GITHUB_WORKSPACE}/pkg/mixxx-${MIXXX_VERSION}-linux-x86_64.zip" opt)
+
+          echo '=== Packages ==='
+          ls -la pkg/
+          echo '=== Deb control ==='
+          cat deb/DEBIAN/control
+
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '=== Git status ==='
+            git status --short 2>/dev/null || true
+            echo
+            echo '=== CMake cache ==='
+            grep -E '^(CMAKE_(BUILD_TYPE|CXX_COMPILER|C_COMPILER):|QT6:|FFMPEG:)' build/CMakeCache.txt 2>/dev/null || true
+            echo
+            echo '=== Version strings ==='
+            grep -E 'MIXXX_VERSION|VERSION_PRERELEASE' CMakeLists.txt | head -5
+            echo
+            echo '=== Installed runtime tree ==='
+            find "${MIXXX_INSTALL_PREFIX}" -maxdepth 4 -type f -printf '%P\n' 2>/dev/null | sort || true
+          } | tee logs/99-diagnostics.log
+
+      - name: Upload release packages and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-20.04-qt6-release-${{ github.run_number }}
+          path: |
+            pkg/*.zip
+            pkg/*.deb
+            logs/
+          if-no-files-found: warn
+          retention-days: 14
