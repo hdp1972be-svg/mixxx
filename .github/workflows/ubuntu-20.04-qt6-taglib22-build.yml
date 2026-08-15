@@ -259,6 +259,38 @@ jobs:
               ;;
           esac
 
+      - name: Install Mixxx runtime tree
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local:${{ env.TAGLIB_PREFIX }}
+          PKG_CONFIG_PATH: ${{ env.TAGLIB_PREFIX }}/lib/pkgconfig
+          LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib:${{ env.TAGLIB_PREFIX }}/lib
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          set -o pipefail
+          export PATH=/opt/qt/6.10.3/bin:$PATH
+          rm -rf /opt/mixxx-taglib22
+          cmake --install build --prefix /opt/mixxx-taglib22 \
+            2>&1 | tee logs/10-cmake-install.log
+          echo '=== Installed runtime tree ==='
+          find /opt/mixxx-taglib22 -type f -printf '%P\n' \
+            | sort | tee logs/10-install-tree.log
+
+      - name: Package Mixxx runtime (TagLib 2.2)
+        shell: bash
+        run: |
+          set -o pipefail
+          tar czf /tmp/mixxx-taglib22-runtime.tar.gz -C /opt/mixxx-taglib22 .
+          ls -lh /tmp/mixxx-taglib22-runtime.tar.gz
+
+      - name: Upload Mixxx runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixxx-taglib22-runtime-${{ github.run_number }}
+          path: /tmp/mixxx-taglib22-runtime.tar.gz
+          if-no-files-found: error
+
       - name: Collect diagnostics
         if: always()
         shell: bash
