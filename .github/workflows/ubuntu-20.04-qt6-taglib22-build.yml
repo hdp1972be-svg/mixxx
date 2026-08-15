@@ -30,7 +30,7 @@ jobs:
             artifact_tag: taglib22
           - taglib_version: "1.11"
             taglib_prefix: /usr
-            taglib_pkgconfig: /usr/lib/x86_64-linux-gnu/pkgconfig
+            taglib_pkgconfig: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
             build_taglib_from_source: false
             artifact_tag: taglib111
     runs-on: ubuntu-24.04
@@ -114,6 +114,11 @@ jobs:
           # support. The 2.2 leg overrides it by putting /opt/taglib/2.2 first
           # in PKG_CONFIG_PATH; the 1.11 leg uses the system package and thus
           # exercises the FFmpeg metadata fallback path.
+          # The 1.11 leg's PKG_CONFIG_PATH puts /usr/local/lib/pkgconfig first
+          # so the freshly built hidapi 0.14.0 .pc wins over the apt one
+          # (0.9.0) that /usr/lib/x86_64-linux-gnu/pkgconfig would otherwise
+          # shadow; /usr/local has no taglib.pc, so system TagLib 1.11 still
+          # resolves from the second entry.
 
       - name: Build hidapi 0.14.0 (Focal ships 0.9.0)
         shell: bash
