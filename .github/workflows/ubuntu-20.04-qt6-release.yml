@@ -307,7 +307,9 @@ jobs:
 
           # Debian package layout (absolute symlink /usr/bin/mixxx -> launcher)
           rm -rf deb pkg && mkdir -p pkg
-          mkdir -p deb/DEBIAN deb/usr/bin
+          # cp -a source dest/ requires dest to exist, else the source *content*
+          # becomes dest and there is no deb/opt/mixxx subtree for dpkg-deb.
+          mkdir -p deb/DEBIAN deb/usr/bin deb/opt
           cp -a "${MIXXX_INSTALL_PREFIX}" deb/opt/
           ln -s /opt/mixxx/bin/mixxx-run deb/usr/bin/mixxx
 
