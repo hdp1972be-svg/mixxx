@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow
-name: Ubuntu 20.04 Focal build with TagLib 2.2 (Qt 6 from artifact)
+name: Ubuntu 20.04 Focal build with TagLib 2.2 / 1.11 (Qt 6 from artifact)
 
 # Manual trigger, and automatic on pushes to the mkv/webm taglib-2.2 test branch.
 on:
@@ -15,12 +15,24 @@ permissions:
 env:
   QT_VERSION: 6.10.3
   QT_PREFIX: /opt/qt/6.10.3
-  TAGLIB_VERSION: 2.2
-  TAGLIB_PREFIX: /opt/taglib/2.2
 
 jobs:
   build:
-    name: Ubuntu 20.04 (Focal) compile against TagLib 2.2
+    name: Ubuntu 20.04 (Focal) compile against TagLib ${{ matrix.taglib_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - taglib_version: "2.2"
+            taglib_prefix: /opt/taglib/2.2
+            taglib_pkgconfig: /opt/taglib/2.2/lib/pkgconfig
+            build_taglib_from_source: true
+            artifact_tag: taglib22
+          - taglib_version: "1.11"
+            taglib_prefix: /usr
+            taglib_pkgconfig: /usr/lib/x86_64-linux-gnu/pkgconfig
+            build_taglib_from_source: false
+            artifact_tag: taglib111
     runs-on: ubuntu-24.04
     container: ubuntu:20.04
 
@@ -28,6 +40,8 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
       TZ: Etc/UTC
       CMAKE_VERSION: 3.31.8
+      TAGLIB_VERSION: ${{ matrix.taglib_version }}
+      TAGLIB_PREFIX: ${{ matrix.taglib_prefix }}
 
     steps:
       - name: Check out repository
@@ -96,9 +110,10 @@ jobs:
             /tmp/debian_buildenv-focal.sh
           chmod +x /tmp/debian_buildenv-focal.sh
           /tmp/debian_buildenv-focal.sh setup 2>&1 | tee logs/04-mixxx-buildenv.log
-          # Focal ships TagLib 1.11.1 (libtag1-dev). It stays installed but the
-          # configure step puts /opt/taglib/2.2 first in PKG_CONFIG_PATH, so
-          # Mixxx resolves TagLib 2.2 from the source build below.
+          # Focal ships TagLib 1.11.1 (libtag1-dev), which has no Matroska
+          # support. The 2.2 leg overrides it by putting /opt/taglib/2.2 first
+          # in PKG_CONFIG_PATH; the 1.11 leg uses the system package and thus
+          # exercises the FFmpeg metadata fallback path.
 
       - name: Build hidapi 0.14.0 (Focal ships 0.9.0)
         shell: bash
@@ -115,6 +130,7 @@ jobs:
           nm -D /usr/local/lib/libhidapi-hidraw.so.0 | grep -q ' hid_get_report_descriptor$'
 
       - name: Build TagLib ${TAGLIB_VERSION} from source (native Matroska/WebM)
+        if: matrix.build_taglib_from_source
         shell: bash
         run: |
           set -o pipefail
@@ -203,7 +219,7 @@ jobs:
         shell: bash
         env:
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local:${{ env.TAGLIB_PREFIX }}
-          PKG_CONFIG_PATH: ${{ env.TAGLIB_PREFIX }}/lib/pkgconfig
+          PKG_CONFIG_PATH: ${{ matrix.taglib_pkgconfig }}
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib:${{ env.TAGLIB_PREFIX }}/lib
           CC: gcc-12
           CXX: g++-12
@@ -227,13 +243,13 @@ jobs:
             2>&1 | tee logs/07-cmake-configure.log
           echo '=== TagLib resolved by Mixxx ==='
           grep -iE 'TagLib' build/CMakeCache.txt || true
-          grep -E 'Found TagLib|suitable version "2\.2"' logs/07-cmake-configure.log || true
+          grep -E 'Found TagLib|suitable version' logs/07-cmake-configure.log || true
 
       - name: Build (Release)
         shell: bash
         env:
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local:${{ env.TAGLIB_PREFIX }}
-          PKG_CONFIG_PATH: ${{ env.TAGLIB_PREFIX }}/lib/pkgconfig
+          PKG_CONFIG_PATH: ${{ matrix.taglib_pkgconfig }}
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib:${{ env.TAGLIB_PREFIX }}/lib
           CC: gcc-12
           CXX: g++-12
@@ -263,32 +279,32 @@ jobs:
         shell: bash
         env:
           CMAKE_PREFIX_PATH: /opt/qt/6.10.3:/usr/local:${{ env.TAGLIB_PREFIX }}
-          PKG_CONFIG_PATH: ${{ env.TAGLIB_PREFIX }}/lib/pkgconfig
+          PKG_CONFIG_PATH: ${{ matrix.taglib_pkgconfig }}
           LD_LIBRARY_PATH: /opt/qt/6.10.3/lib:/usr/local/lib:${{ env.TAGLIB_PREFIX }}/lib
           CC: gcc-12
           CXX: g++-12
         run: |
           set -o pipefail
           export PATH=/opt/qt/6.10.3/bin:$PATH
-          rm -rf /opt/mixxx-taglib22
-          cmake --install build --prefix /opt/mixxx-taglib22 \
+          rm -rf "/opt/mixxx-${{ matrix.artifact_tag }}"
+          cmake --install build --prefix "/opt/mixxx-${{ matrix.artifact_tag }}" \
             2>&1 | tee logs/10-cmake-install.log
           echo '=== Installed runtime tree ==='
-          find /opt/mixxx-taglib22 -type f -printf '%P\n' \
+          find "/opt/mixxx-${{ matrix.artifact_tag }}" -type f -printf '%P\n' \
             | sort | tee logs/10-install-tree.log
 
-      - name: Package Mixxx runtime (TagLib 2.2)
+      - name: Package Mixxx runtime (TagLib ${TAGLIB_VERSION})
         shell: bash
         run: |
           set -o pipefail
-          tar czf /tmp/mixxx-taglib22-runtime.tar.gz -C /opt/mixxx-taglib22 .
-          ls -lh /tmp/mixxx-taglib22-runtime.tar.gz
+          tar czf "/tmp/mixxx-${{ matrix.artifact_tag }}-runtime.tar.gz" -C "/opt/mixxx-${{ matrix.artifact_tag }}" .
+          ls -lh "/tmp/mixxx-${{ matrix.artifact_tag }}-runtime.tar.gz"
 
       - name: Upload Mixxx runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mixxx-taglib22-runtime-${{ github.run_number }}
-          path: /tmp/mixxx-taglib22-runtime.tar.gz
+          name: mixxx-${{ matrix.artifact_tag }}-runtime-${{ github.run_number }}
+          path: /tmp/mixxx-${{ matrix.artifact_tag }}-runtime.tar.gz
           if-no-files-found: error
 
       - name: Collect diagnostics
@@ -315,7 +331,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-20.04-qt6-taglib22-build-${{ github.run_number }}
+          name: ubuntu-20.04-qt6-taglib22-build-${{ matrix.artifact_tag }}-${{ github.run_number }}
           path: logs/
           if-no-files-found: warn
           retention-days: 14
