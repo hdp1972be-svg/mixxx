@@ -270,7 +270,7 @@ jobs:
           lib=$(ldd build/mixxx 2>/dev/null | awk '/libtag\.so/{print $3}' | head -1)
           lib_real=$(realpath -e "${lib}" 2>/dev/null || echo "${lib}")
           echo "libtag resolved to: ${lib} (canonical: ${lib_real})"
-          ldd build/mixxx 2>&1 | grep -i taglib | tee logs/09-taglib-linkage.log
+          ldd build/mixxx 2>&1 | grep -i 'libtag' | tee logs/09-taglib-linkage.log
           case "${lib_real}" in
             ${TAGLIB_PREFIX}/*)
               echo "OK: mixxx links TagLib ${TAGLIB_VERSION} from ${TAGLIB_PREFIX}"
