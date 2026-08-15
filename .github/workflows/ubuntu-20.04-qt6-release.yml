@@ -52,7 +52,7 @@ jobs:
 
           apt-get update 2>&1 | tee logs/01-apt-update.log
           apt-get install -y --no-install-recommends \
-            bash ca-certificates git wget curl xz-utils file pkg-config unzip \
+            bash ca-certificates git wget curl xz-utils file pkg-config unzip zip \
             ninja-build build-essential python3 python3-pip sudo gdb \
             2>&1 | tee logs/02-base-packages.log
 
