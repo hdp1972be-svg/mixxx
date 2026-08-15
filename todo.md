@@ -11,5 +11,7 @@
 
 ## CI: MKV/WebM TagLib 2.2 build verification
 
-- Verify both matrix legs (TagLib 2.2 and 1.11) pass on the hdp fork after the
+- [x] Verify both matrix legs (TagLib 2.2 and 1.11) pass on the hdp fork after the
   taglib.h include fix and the libtag path canonicalization fix.
+- [x] Run 31885909791: both legs succeeded; runtime artifacts and logs uploaded.
+  develop.yml disabled on the fork because it always fails there (unrelated).
