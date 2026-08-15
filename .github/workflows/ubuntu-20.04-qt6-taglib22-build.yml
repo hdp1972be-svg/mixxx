@@ -268,14 +268,15 @@ jobs:
         run: |
           set -o pipefail
           lib=$(ldd build/mixxx 2>/dev/null | awk '/libtag\.so/{print $3}' | head -1)
-          echo "libtag resolved to: ${lib}"
+          lib_real=$(realpath -e "${lib}" 2>/dev/null || echo "${lib}")
+          echo "libtag resolved to: ${lib} (canonical: ${lib_real})"
           ldd build/mixxx 2>&1 | grep -i taglib | tee logs/09-taglib-linkage.log
-          case "${lib}" in
+          case "${lib_real}" in
             ${TAGLIB_PREFIX}/*)
               echo "OK: mixxx links TagLib ${TAGLIB_VERSION} from ${TAGLIB_PREFIX}"
               ;;
             *)
-              echo "FAIL: libtag is not from ${TAGLIB_PREFIX}" >&2
+              echo "FAIL: libtag is not from ${TAGLIB_PREFIX} (resolved: ${lib_real})" >&2
               exit 1
               ;;
           esac
