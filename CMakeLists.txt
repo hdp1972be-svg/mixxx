@@ -2768,7 +2768,7 @@ endif()
 
 # FFmpeg support
 # FFmpeg is multimedia library that can be found http://ffmpeg.org/
-find_package(FFmpeg COMPONENTS AVCODEC AVFORMAT AVUTIL SWRESAMPLE)
+find_package(FFmpeg COMPONENTS AVCODEC AVFORMAT AVUTIL SWRESAMPLE SWSCALE)
 default_option(FFMPEG "FFmpeg support (version 4.1.9 or later)" "FFmpeg_FOUND")
 if(FFMPEG)
   if(NOT FFmpeg_FOUND)

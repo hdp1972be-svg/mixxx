@@ -8,6 +8,7 @@ extern "C" {
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100) // FFmpeg 5.1
 #include <libavutil/channel_layout.h>
 #endif
+#include <libswscale/swscale.h>
 
 } // extern "C"
 
@@ -143,6 +144,99 @@ inline void avTrace(const QString& preamble, const AVFrame& avFrame) {
             << '}';
 }
 #endif // VERBOSE_DEBUG_LOG
+
+// Returns true if the decoded video frame is considered black. This is
+// used to skip black frames when importing a video frame as cover art,
+// e.g. when a video fades in from black.
+bool isProbablyBlackFrame(const AVFrame* pavFrame) {
+    if (pavFrame == nullptr || pavFrame->width <= 0 ||
+            pavFrame->height <= 0 || pavFrame->data[0] == nullptr) {
+        return true;
+    }
+    const uint8_t* pLumaPlane = pavFrame->data[0];
+    const int lumaLineSize = pavFrame->linesize[0];
+    const uint64_t pixelCount =
+            static_cast<uint64_t>(pavFrame->width) * pavFrame->height;
+    uint64_t lumaSum = 0;
+    for (int row = 0; row < pavFrame->height; ++row) {
+        const uint8_t* pRow = pLumaPlane + row * lumaLineSize;
+        for (int col = 0; col < pavFrame->width; ++col) {
+            lumaSum += pRow[col];
+        }
+    }
+    // The average luma is compared against a threshold in the lower range
+    // of the 8 bit luma values.
+    return lumaSum / pixelCount <= 24;
+}
+
+// Scales a decoded video frame down to a cover art image (max dimension
+// 600 pixels) and stores it in pImage. Returns true on success.
+bool scaleVideoFrameToQImage(AVFrame* pavFrame, QImage* pImage) {
+    if (pavFrame == nullptr || pImage == nullptr) {
+        return false;
+    }
+    const int frameWidth = pavFrame->width;
+    const int frameHeight = pavFrame->height;
+    if (frameWidth <= 0 || frameHeight <= 0) {
+        return false;
+    }
+    constexpr int kMaxCoverArtDimension = 600;
+    int scaledWidth = frameWidth;
+    int scaledHeight = frameHeight;
+    if (scaledWidth > kMaxCoverArtDimension ||
+            scaledHeight > kMaxCoverArtDimension) {
+        // Downscale the larger dimension to 600 pixels while keeping the
+        // aspect ratio of the video frame.
+        if (scaledWidth >= scaledHeight) {
+            scaledHeight =
+                    scaledHeight * kMaxCoverArtDimension / scaledWidth;
+            scaledWidth = kMaxCoverArtDimension;
+        } else {
+            scaledWidth =
+                    scaledWidth * kMaxCoverArtDimension / scaledHeight;
+            scaledHeight = kMaxCoverArtDimension;
+        }
+        // Guard against a zero sized image after downscaling.
+        if (scaledWidth <= 0) {
+            scaledWidth = 1;
+        }
+        if (scaledHeight <= 0) {
+            scaledHeight = 1;
+        }
+    }
+    SwsContext* pScaleContext = sws_getContext(
+            frameWidth,
+            frameHeight,
+            static_cast<AVPixelFormat>(pavFrame->format),
+            scaledWidth,
+            scaledHeight,
+            AV_PIX_FMT_BGRA,
+            SWS_BILINEAR,
+            nullptr,
+            nullptr,
+            nullptr);
+    if (pScaleContext == nullptr) {
+        return false;
+    }
+    QImage image(scaledWidth, scaledHeight, QImage::Format_RGBA8888);
+    image.fill(Qt::transparent);
+    uint8_t* pDestinationData[] = {image.bits()};
+    const int destinationLineSizes[] = {image.bytesPerLine()};
+    const int scaleResult = sws_scale(
+            pScaleContext,
+            pavFrame->data,
+            pavFrame->linesize,
+            /*srcSliceY=*/ 0,
+            frameHeight,
+            pDestinationData,
+            destinationLineSizes);
+    sws_freeContext(pScaleContext);
+    if (scaleResult != scaledHeight) {
+        return false;
+    }
+    *pImage = image;
+    return true;
+}
 
 } // anonymous namespace
 
@@ -833,10 +927,19 @@ SoundSourceFFmpeg::importTrackMetadataAndCoverImage(
     // TagLib >= 2.2 handles Matroska/WebM (duration, cover art) natively.
 #if (TAGLIB_MAJOR_VERSION > 2) || \
         ((TAGLIB_MAJOR_VERSION == 2) && (TAGLIB_MINOR_VERSION >= 2))
-    return MetadataSourceTagLib::importTrackMetadataAndCoverImage(
-            pTrackMetadata,
-            pCoverArt,
-            resetMissingTagMetadata);
+    // TagLib >= 2.2 imports the tags, the duration and the embedded cover
+    // art of Matroska/WebM files. Files without embedded cover art fall
+    // back to decoding a video frame as cover art.
+    const auto importResult =
+            MetadataSourceTagLib::importTrackMetadataAndCoverImage(
+                    pTrackMetadata,
+                    pCoverArt,
+                    resetMissingTagMetadata);
+    if (pCoverArt != nullptr && pCoverArt->isNull() &&
+            importVideoFrameAsCoverArt(getLocalFileName(), pCoverArt)) {
+        return std::make_pair(ImportResult::Succeeded, importResult.second);
+    }
+    return importResult;
 #else
     // TagLib < 2.2 fallback: import the stream info for Matroska/WebM
     // from the FFmpeg container.
@@ -853,7 +956,12 @@ SoundSourceFFmpeg::importTrackMetadataAndCoverImage(
     const auto sourceSynchronizedAt = getFileSynchronizedAt(
             QFile(getLocalFileName()));
     if (pTrackMetadata == nullptr) {
-        // Cover art cannot be imported from Matroska/WebM files.
+        // TagLib < 2.2 cannot import cover art from Matroska/WebM files.
+        // Fall back to decoding a video frame as cover art.
+        if (pCoverArt != nullptr && pCoverArt->isNull() &&
+                importVideoFrameAsCoverArt(getLocalFileName(), pCoverArt)) {
+            return std::make_pair(ImportResult::Succeeded, sourceSynchronizedAt);
+        }
         return std::make_pair(ImportResult::Unavailable, sourceSynchronizedAt);
     }
 
@@ -946,6 +1054,190 @@ SoundSourceFFmpeg::importTrackMetadataAndCoverImage(
     avformat_close_input(&pavInputFormatContext);
     return std::make_pair(ImportResult::Succeeded, sourceSynchronizedAt);
 #endif
+}
+
+// @anchor: ffmpeg:video-frame-cover-art
+// Fallback cover art for Matroska/WebM files without embedded cover art.
+// Opens the file in a separate input context and decodes a single video
+// frame with a dedicated decoder, so the decoding state of this
+// SoundSource is not affected.
+bool SoundSourceFFmpeg::importVideoFrameAsCoverArt(
+        const QString& fileName,
+        QImage* pCoverArt) {
+    if (pCoverArt == nullptr) {
+        return false;
+    }
+    AVFormatContext* pavInputFormatContext = openInputFile(fileName);
+    if (pavInputFormatContext == nullptr) {
+        return false;
+    }
+    const int findStreamInfoResult =
+            avformat_find_stream_info(pavInputFormatContext, nullptr);
+    if (findStreamInfoResult != 0) {
+        kLogger.warning()
+                << "Failed to read stream info for video frame cover art"
+                << fileName;
+        avformat_close_input(&pavInputFormatContext);
+        return false;
+    }
+
+    // Select a video stream and its decoder. Unlike the audio stream we do
+    // not require a specific stream index, any decodable video stream is
+    // acceptable for the cover art.
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 0, 100) // FFmpeg 5.0
+    const AVCodec* pDecoder = nullptr;
+#else
+    AVCodec* pDecoder = nullptr;
+#endif
+    const int streamIndex = av_find_best_stream(
+            pavInputFormatContext,
+            AVMEDIA_TYPE_VIDEO,
+            /*wanted_stream_index=*/ -1,
+            /*related_stream=*/ -1,
+            &pDecoder,
+            /*flags=*/ 0);
+    if (streamIndex < 0 || pDecoder == nullptr) {
+        // No video stream available. This is expected for audio-only files.
+        avformat_close_input(&pavInputFormatContext);
+        return false;
+    }
+    AVStream* pavStream = pavInputFormatContext->streams[streamIndex];
+    VERIFY_OR_DEBUG_ASSERT(pavStream != nullptr) {
+        avformat_close_input(&pavInputFormatContext);
+        return false;
+    }
+
+    AVCodecContextPtr pavCodecContext = AVCodecContextPtr::alloc(pDecoder);
+    if (!pavCodecContext) {
+        avformat_close_input(&pavInputFormatContext);
+        return false;
+    }
+    const int parametersResult = avcodec_parameters_to_context(
+            pavCodecContext, pavStream->codecpar);
+    if (parametersResult < 0) {
+        kLogger.warning()
+                << "Failed to configure video decoder for cover art import"
+                << fileName;
+        avformat_close_input(&pavInputFormatContext);
+        return false;
+    }
+    if (!openDecodingContext(pavCodecContext)) {
+        kLogger.warning()
+                << "Failed to open video decoder for cover art import"
+                << fileName;
+        avformat_close_input(&pavInputFormatContext);
+        return false;
+    }
+
+    // Skip the intro and title sequences by seeking one second after the
+    // start of the stream. If the seek fails, decoding continues from the
+    // current position (usually the beginning of the stream).
+    const int64_t targetTimestamp = av_rescale_q(
+            AV_TIME_BASE,
+            AV_TIME_BASE_Q,
+            pavStream->time_base);
+    bool skipIntroFrames = false;
+    if (targetTimestamp != AV_NOPTS_VALUE) {
+        // Try the backward seek first, then retry without the flag in
+        // case the stream does not support it.
+        if (av_seek_frame(
+                    pavInputFormatContext,
+                    streamIndex,
+                    targetTimestamp,
+                    AVSEEK_FLAG_BACKWARD) >= 0 ||
+                av_seek_frame(
+                        pavInputFormatContext,
+                        streamIndex,
+                        targetTimestamp,
+                        /*flags=*/ 0) >= 0) {
+            skipIntroFrames = true;
+        }
+    }
+
+    // Decode frames until a non-black frame after the target position is
+    // found. The number of decoded frames is limited to keep the import
+    // fast for pathological files.
+    constexpr int kMaxDecodedFrames = 30;
+    AVPacket* pavPacket = av_packet_alloc();
+    AVFrame* pavDecodedFrame = av_frame_alloc();
+    if (pavPacket == nullptr || pavDecodedFrame == nullptr) {
+        av_packet_free(&pavPacket);
+        av_frame_free(&pavDecodedFrame);
+        avformat_close_input(&pavInputFormatContext);
+        return false;
+    }
+    bool coverArtImported = false;
+    int decodedFrameCount = 0;
+
+    // Handles a single decoded frame: skips frames before the target
+    // position and black frames, scales the first usable frame to a
+    // cover art image. Returns true if the cover art was imported.
+    const auto processDecodedFrame = [&](AVFrame* pavFrame) -> bool {
+        ++decodedFrameCount;
+        if (skipIntroFrames && pavFrame->pts != AV_NOPTS_VALUE &&
+                pavFrame->pts < targetTimestamp) {
+            // The frame belongs to the intro before the target position.
+            return false;
+        }
+        if (isProbablyBlackFrame(pavFrame)) {
+            // Skip black frames, e.g. when fading in from black.
+            return false;
+        }
+        coverArtImported = scaleVideoFrameToQImage(pavFrame, pCoverArt);
+        return coverArtImported;
+    };
+
+    while (!coverArtImported && decodedFrameCount < kMaxDecodedFrames) {
+        av_packet_unref(pavPacket);
+        const int readResult = av_read_frame(pavInputFormatContext, pavPacket);
+        if (readResult == AVERROR_EOF) {
+            // Flush the decoder to drain the remaining buffered frames.
+            avcodec_send_packet(pavCodecContext, nullptr);
+            break;
+        }
+        if (readResult < 0) {
+            break;
+        }
+        if (pavPacket->stream_index != streamIndex) {
+            continue;
+        }
+        if (avcodec_send_packet(pavCodecContext, pavPacket) < 0) {
+            break;
+        }
+        // Drain all decodable frames of this packet.
+        while (!coverArtImported && decodedFrameCount < kMaxDecodedFrames) {
+            const int receiveResult =
+                    avcodec_receive_frame(pavCodecContext, pavDecodedFrame);
+            if (receiveResult == AVERROR(EAGAIN) ||
+                    receiveResult == AVERROR_EOF) {
+                break;
+            }
+            if (receiveResult < 0) {
+                break;
+            }
+            if (processDecodedFrame(pavDecodedFrame)) {
+                break;
+            }
+        }
+    }
+    // Drain the frames that were still buffered when the end of the file
+    // was reached.
+    while (!coverArtImported && decodedFrameCount < kMaxDecodedFrames) {
+        const int receiveResult =
+                avcodec_receive_frame(pavCodecContext, pavDecodedFrame);
+        if (receiveResult == AVERROR(EAGAIN) ||
+                receiveResult == AVERROR_EOF || receiveResult < 0) {
+            break;
+        }
+        if (processDecodedFrame(pavDecodedFrame)) {
+            break;
+        }
+    }
+
+    av_packet_free(&pavPacket);
+    av_frame_free(&pavDecodedFrame);
+    avformat_close_input(&pavInputFormatContext);
+    return coverArtImported;
 }
 
 bool SoundSourceFFmpeg::initResampling(

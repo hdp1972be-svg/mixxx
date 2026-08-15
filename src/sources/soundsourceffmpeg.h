@@ -226,6 +226,13 @@ class SoundSourceFFmpeg : public SoundSource {
 
     bool consumeNextAVPacket(AVPacket** ppavNextPacket);
 
+    // Fallback cover art for Matroska/WebM files without embedded cover
+    // art: decode a single video frame from the file and store it in
+    // pCoverArt. Returns true if a frame was imported successfully.
+    static bool importVideoFrameAsCoverArt(
+            const QString& fileName,
+            QImage* pCoverArt);
+
     int m_wantedStreamIndex;
     bool m_isLibfdk_aac;
 };
