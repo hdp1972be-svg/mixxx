@@ -505,6 +505,7 @@ QStringList SoundSourceProviderFFmpeg::getSupportedFileTypes() const {
                 continue;
             } else if (!strcmp(pavInputFormat->name, "matroska,webm")) {
                 list.append("mkv");
+                list.append("mka");
                 list.append("webm");
                 continue;
 
@@ -969,6 +970,7 @@ SoundSourceFFmpeg::importTrackMetadataAndCoverImage(
     const QString fileSuffix =
             QFileInfo(getLocalFileName()).suffix().toLower();
     if (fileSuffix != QLatin1String("mkv") &&
+            fileSuffix != QLatin1String("mka") &&
             fileSuffix != QLatin1String("webm")) {
         return MetadataSourceTagLib::importTrackMetadataAndCoverImage(
                 pTrackMetadata,
