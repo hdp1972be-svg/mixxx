@@ -4,6 +4,8 @@ name: Ubuntu 20.04 Focal build (Qt 6 from artifact)
 
 on:
   push:
+    paths-ignore:
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
