@@ -1,0 +1,242 @@
+# Build Qt 6.5.3 against Ubuntu 20.04 (Focal) and publish it as an artifact.
+# The artifact can subsequently be consumed by the Focal Mixxx build.
+# Also publishes a rolling GitHub release (tag qt65-focal) with the Qt
+# tarball; the Mixxx .deb is attached later by package-deb.yml.
+# Includes libqt6keychain built from source.
+
+name: Qt 6.5.3 - Ubuntu 20.04
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+    paths:
+      - '.github/workflows/qt6.5-focal.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: qt65-focal-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: 6.5.3
+  QT_PREFIX: /opt/qt/6.5.3
+  QT_SRC: ${{ github.workspace }}/qt-src
+  QT_BUILD: ${{ github.workspace }}/qt-build
+  CMAKE_VERSION: 3.31.9
+
+jobs:
+  build-qt6:
+    name: Qt 6.5.3 / Focal
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:20.04
+      options: --user root
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Focal build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            build-essential \
+            ninja-build \
+            perl \
+            python3 \
+            git \
+            wget \
+            xz-utils \
+            pkg-config \
+            libfontconfig1-dev \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libglib2.0-dev \
+            libicu-dev \
+            libinput-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-glx0-dev \
+            libxcb-keysyms1-dev \
+            libxcb-image0-dev \
+            libxcb-render-util0-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xinerama0-dev \
+            libxcb-xkb-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrender-dev \
+            libxrandr-dev \
+            libxcomposite-dev \
+            libxcursor-dev \
+            libxdamage-dev \
+            libwayland-dev \
+            libssl-dev \
+            libsecret-1-dev
+
+      - name: Install modern CMake
+        shell: bash
+        run: |
+          set -euxo pipefail
+          wget -q --show-progress \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+            -O /tmp/cmake.tar.gz
+          tar -xzf /tmp/cmake.tar.gz -C /opt
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest" /usr/local/bin/ctest
+          ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cpack" /usr/local/bin/cpack
+          cmake --version
+
+      - name: Record toolchain versions
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p logs
+          {
+            echo '=== OS ==='
+            cat /etc/os-release
+            echo '=== GCC ==='
+            gcc --version
+            echo '=== CMake ==='
+            cmake --version
+            echo '=== Ninja ==='
+            ninja --version
+            echo '=== Python ==='
+            python3 --version
+          } 2>&1 | tee logs/toolchain.txt
+
+      - name: Download complete Qt source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$QT_SRC"
+          wget -q --show-progress \
+            "https://download.qt.io/official_releases/qt/6.5/${QT_VERSION}/single/qt-everywhere-src-${QT_VERSION}.tar.xz" \
+            -O qt.tar.xz
+          tar -xf qt.tar.xz -C "$QT_SRC" --strip-components=1
+          rm -f qt.tar.xz
+
+      - name: Configure Qt
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p logs "$QT_BUILD"
+          cd "$QT_BUILD"
+          # Disable the Quick3D XR/OpenXR module: on Ubuntu 20.04 the EGL headers pull in
+          # X11/Xlib.h, which #defines Bool as int and collides with
+          # QShaderDescription::VariableType::Bool in the qtquick3d XR sources.
+          "$QT_SRC/configure" \
+            -prefix "$QT_PREFIX" \
+            -release \
+            -opensource \
+            -confirm-license \
+            -nomake examples \
+            -nomake tests \
+            -qt-zlib \
+            -qt-pcre \
+            -qt-libpng \
+            -qt-libjpeg \
+            -qt-freetype \
+            -openssl-linked \
+            INPUT_openxr=no 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-configure.log"
+
+      - name: Build Qt
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build "$QT_BUILD" --parallel "$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-build.log"
+
+      - name: Install Qt
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --install "$QT_BUILD" 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-install.log"
+
+      - name: Verify Qt installation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -x "$QT_PREFIX/bin/qmake"
+          test -d "$QT_PREFIX/lib/cmake/Qt6"
+          "$QT_PREFIX/bin/qmake" --version 2>&1 | tee "$GITHUB_WORKSPACE/logs/qt-version.txt"
+
+      - name: Build and install libqt6keychain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/qt6keychain-build
+          git clone --depth 1 https://github.com/niclasr/qt6keychain.git /tmp/qt6keychain-src
+          cd /tmp/qt6keychain-build
+          cmake -G Ninja \
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
+            -DCMAKE_INSTALL_PREFIX="$QT_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCRYPTOBOX_BACKEND=none \
+            /tmp/qt6keychain-src
+          cmake --build . --parallel "$(nproc)"
+          cmake --install .
+
+      - name: Package Qt artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          tar -C /opt/qt -cJf "$GITHUB_WORKSPACE/artifacts/qt-${QT_VERSION}-ubuntu20.04.tar.xz" "${QT_VERSION}"
+          sha256sum "$GITHUB_WORKSPACE/artifacts/qt-${QT_VERSION}-ubuntu20.04.tar.xz" \
+            | tee "$GITHUB_WORKSPACE/artifacts/qt-${QT_VERSION}-ubuntu20.04.tar.xz.sha256"
+
+      - name: Upload Qt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt-${{ env.QT_VERSION }}-ubuntu20.04
+          path: artifacts/
+          retention-days: 14
+
+      # Publish the Qt tarball to the rolling qt65-focal release. The tag is
+      # stable, so every successful run updates the same release in place
+      # (assets are overwritten); GitHub artifacts expire after 14 days here,
+      # the release download link does not.
+      - name: Publish rolling GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: qt65-focal
+          name: Qt 6.5 for Ubuntu 20.04
+          body: |
+            Qt ${{ env.QT_VERSION }} built for Ubuntu 20.04 (Focal) from source.
+
+            ## Contents
+            - qt-${{ env.QT_VERSION }}-ubuntu20.04.tar.xz - prebuilt Qt install tree (includes libqt6keychain)
+            - qt-${{ env.QT_VERSION }}-ubuntu20.04.tar.xz.sha256 - checksum
+            - mixxx-*.deb - Mixxx Debian package, attached by the package-deb workflow
+          files: |
+            artifacts/qt-${{ env.QT_VERSION }}-ubuntu20.04.tar.xz
+            artifacts/qt-${{ env.QT_VERSION }}-ubuntu20.04.tar.xz.sha256
+          target_commitish: ${{ github.sha }}
+          overwrite_files: true
+          make_latest: true
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qt-${{ env.QT_VERSION }}-ubuntu20.04-logs
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 14
